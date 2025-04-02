@@ -1,0 +1,12 @@
+streamlit
+fitz  # PyMuPDF
+pdfplumber # For PDF viewer rendering
+openai
+langchain
+pandas
+dotenv
+thefuzz
+python-docx
+PyMuPDF
+openpyxl
+python-docx
