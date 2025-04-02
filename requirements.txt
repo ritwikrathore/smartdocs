@@ -1,15 +1,15 @@
-streamlit
-PyMuPDF
-pdfplumber
-openai
-python-dotenv
-langchain
-google-generativeai
-thefuzz
-python-docx
-pandas
-openpyxl
-sentence-transformers
-numpy
-torch
+streamlit == 1.44.0
+PyMuPDF == 1.25.4
+pdfplumber == 0.11.6
+openai == 1.69.0
+python-dotenv == 1.1.0
+langchain == 0.3.21
+google-generativeai == 0.8.4
+thefuzz == 0.22.1
+python-docx == 1.1.2
+pandas == 2.2.3
+openpyxl == 3.1.5
+sentence-transformers == 4.0.1
+numpy == 2.2.4
+torch == 2.6.0
 # Add specific versions if needed, e.g., streamlit>=1.30.0
