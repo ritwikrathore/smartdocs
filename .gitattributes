@@ -1,0 +1,2 @@
+embedding_model_local/model.safetensors filter=lfs diff=lfs merge=lfs -text
+reranking_model_local/model.safetensors filter=lfs diff=lfs merge=lfs -text

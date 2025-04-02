@@ -1,0 +1,8 @@
+# .gitignore
+.streamlit/
+*.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
