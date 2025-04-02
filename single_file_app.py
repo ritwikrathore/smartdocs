@@ -11,6 +11,7 @@ import tempfile
 import threading
 import queue
 import atexit
+import time
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -43,28 +44,35 @@ st.set_page_config(layout="wide", page_title="SmartDocs Analysis")
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", 4))
 ENABLE_PARALLEL = os.environ.get("ENABLE_PARALLEL", "true").lower() == "true"
 FUZZY_MATCH_THRESHOLD = 88  # Adjust this threshold (0-100)
-RAG_TOP_K = 15 # Number of relevant chunks to retrieve per sub-prompt (Adjusted from 20)
+RAG_TOP_K = 10 # Number of relevant chunks to retrieve per sub-prompt (Adjusted from 15)
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"  # Smaller, faster model for embeddings
 # Consider using a faster/cheaper model for decomposition if latency is an issue
 DECOMPOSITION_MODEL_NAME = "gemini-1.5-flash"
 ANALYSIS_MODEL_NAME = "gemini-2.0-flash"
 
-# --- Load Embedding Model (Load once globally) ---
-embedding_model = None
-try:
-    logger.info(f"Loading embedding model: {EMBEDDING_MODEL_NAME}...")
-    # Check for CUDA availability, fallback to CPU if needed
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME, device=device)
-    logger.info(f"Embedding model loaded successfully on device: {device}")
-except Exception as e:
-    logger.error(f"Failed to load embedding model: {e}", exc_info=True)
-    st.error(
-        f"Fatal Error: Could not load embedding model '{EMBEDDING_MODEL_NAME}'. "
-        "Document processing is disabled. Please check installation and dependencies."
-    )
-    # Set model to None to disable processing functions
-    embedding_model = None
+# --- Load Embedding Model (Cached) ---
+@st.cache_resource # Use cache_resource for non-data objects like models
+def load_embedding_model():
+    """Loads the SentenceTransformer model and caches it."""
+    model = None
+    try:
+        logger.info(f"Loading embedding model: {EMBEDDING_MODEL_NAME}...")
+        # Check for CUDA availability, fallback to CPU if needed
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = SentenceTransformer(EMBEDDING_MODEL_NAME, device=device)
+        logger.info(f"Embedding model loaded successfully on device: {device}")
+    except Exception as e:
+        logger.error(f"Failed to load embedding model: {e}", exc_info=True)
+        st.error(
+            f"Fatal Error: Could not load embedding model '{EMBEDDING_MODEL_NAME}'. "
+            "Document processing is disabled. Please check installation and dependencies."
+        )
+        # Return None or raise an exception if loading fails critically
+        model = None
+    return model
+
+# Load the model using the cached function
+embedding_model = load_embedding_model()
 
 
 # --- Helper Functions ---
@@ -325,15 +333,17 @@ class DocumentAnalyzer:
                  raise TimeoutError(f"Google API request timed out for model {model_name}.") from e
             raise
 
-    async def decompose_prompt(self, user_prompt: str) -> List[str]:
+    async def decompose_prompt(self, user_prompt: str) -> List[Dict[str, str]]: # Changed return type
         """
-        Analyzes the user prompt with an LLM to break it down into individual questions/tasks.
-        Returns a list of sub-prompts. Returns the original prompt in a list on failure.
+        Analyzes the user prompt with an LLM to break it down into individual questions/tasks,
+        each with a suggested concise title.
+        Returns a list of dictionaries, each containing 'sub_prompt' and 'title'.
+        Returns [{'sub_prompt': user_prompt, 'title': 'Overall Analysis'}] on failure.
         """
         logger.info(f"Decomposing prompt: '{user_prompt[:100]}...'")
         system_prompt = """You are a helpful assistant. Your task is to analyze the user's prompt and identify distinct questions or analysis tasks within it.
-Break down the prompt into a list of self-contained, individual questions or tasks.
-Your entire response MUST be a single JSON object containing a single key "sub_prompts", whose value is a list of strings. Each string in the list should be one distinct question or task.
+Break down the prompt into a list of self-contained, individual questions or tasks. For each task, also provide a concise, descriptive title (max 5-6 words).
+Your entire response MUST be a single JSON object containing a single key "decomposition", whose value is a list of JSON objects. Each object in the list must have two keys: "title" (the concise title) and "sub_prompt" (the full sub-prompt text).
 Do not include any explanations, introductory text, or markdown formatting outside the JSON structure.
 
 Example Input Prompt:
@@ -344,11 +354,23 @@ how many families had student debt?"
 
 Example JSON Output:
 {
-  "sub_prompts": [
-    "what was the change in the median net housing value?",
-    "was there any change in The homeownership rate?",
-    "how many families had credit card debt?",
-    "how many families had student debt?"
+  "decomposition": [
+    {
+      "title": "Median Net Housing Value Change",
+      "sub_prompt": "what was the change in the median net housing value?"
+    },
+    {
+      "title": "Homeownership Rate Change",
+      "sub_prompt": "was there any change in The homeownership rate?"
+    },
+    {
+      "title": "Families with Credit Card Debt",
+      "sub_prompt": "how many families had credit card debt?"
+    },
+    {
+      "title": "Families with Student Debt",
+      "sub_prompt": "how many families had student debt?"
+    }
   ]
 }
 
@@ -357,9 +379,15 @@ Example Input Prompt:
 
 Example JSON Output:
 {
-  "sub_prompts": [
-    "Analyze the termination clause.",
-    "Analyze the liability limitations."
+  "decomposition": [
+    {
+      "title": "Termination Clause Analysis",
+      "sub_prompt": "Analyze the termination clause."
+    },
+    {
+      "title": "Liability Limitations Analysis",
+      "sub_prompt": "Analyze the liability limitations."
+    }
   ]
 }
 
@@ -368,24 +396,30 @@ Example Input Prompt:
 
 Example JSON Output:
 {
-  "sub_prompts": [
-    "Summarize the key findings of the report."
+  "decomposition": [
+    {
+      "title": "Key Findings Summary",
+      "sub_prompt": "Summarize the key findings of the report."
+    }
   ]
 }
 """
-        human_prompt = f"Analyze the following prompt and return the decomposed questions/tasks as a JSON list according to the system instructions:\n\n{user_prompt}"
+        human_prompt = f"Analyze the following prompt and return the decomposed questions/tasks and their titles as a JSON list of objects according to the system instructions:\n\n{user_prompt}"
 
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": human_prompt},
         ]
 
+        # Fallback result in case of errors
+        fallback_result = [{"title": "Overall Analysis", "sub_prompt": user_prompt}]
+
         try:
             response_content = await self._get_completion(messages, model_name=DECOMPOSITION_MODEL_NAME)
 
             # Attempt to parse the JSON
             try:
-                # Clean potential markdown fences
+                # Clean potential markdown fences (same logic as before)
                 cleaned_response = response_content.strip()
                 match = re.search(r"```json\s*(\{.*?\})\s*```", cleaned_response, re.DOTALL)
                 if match:
@@ -393,7 +427,6 @@ Example JSON Output:
                 elif cleaned_response.startswith("{") and cleaned_response.endswith("}"):
                     json_str = cleaned_response
                 else:
-                     # Try finding first { and last } as a fallback
                      first_brace = cleaned_response.find('{')
                      last_brace = cleaned_response.rfind('}')
                      if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
@@ -404,35 +437,40 @@ Example JSON Output:
 
                 parsed_json = json.loads(json_str)
 
-                if isinstance(parsed_json, dict) and "sub_prompts" in parsed_json:
-                    sub_prompts = parsed_json["sub_prompts"]
-                    if isinstance(sub_prompts, list) and all(isinstance(p, str) for p in sub_prompts):
-                        logger.info(f"Successfully decomposed prompt into {len(sub_prompts)} sub-prompts.")
-                        # Optional: Filter out empty strings just in case
-                        sub_prompts = [p for p in sub_prompts if p.strip()]
-                        if not sub_prompts: # If filtering leaves nothing, fallback
-                             logger.warning("Decomposition resulted in an empty list after filtering. Falling back to original prompt.")
-                             return [user_prompt]
-                        return sub_prompts
+                # Validate the new structure
+                if isinstance(parsed_json, dict) and "decomposition" in parsed_json:
+                    decomposition_list = parsed_json["decomposition"]
+                    if (isinstance(decomposition_list, list) and
+                        all(isinstance(item, dict) and "title" in item and "sub_prompt" in item
+                            and isinstance(item["title"], str) and isinstance(item["sub_prompt"], str)
+                            for item in decomposition_list)):
+
+                        logger.info(f"Successfully decomposed prompt into {len(decomposition_list)} sub-prompts with titles.")
+                        # Filter out items with empty titles or sub-prompts
+                        valid_items = [item for item in decomposition_list if item["title"].strip() and item["sub_prompt"].strip()]
+                        if not valid_items:
+                             logger.warning("Decomposition resulted in an empty list after filtering. Falling back.")
+                             return fallback_result
+                        return valid_items
                     else:
-                        logger.warning("Decomposition JSON found, but 'sub_prompts' key is not a list of strings. Falling back.")
-                        return [user_prompt]
+                        logger.warning("Decomposition JSON found, but 'decomposition' key is not a list of valid {'title': str, 'sub_prompt': str} objects. Falling back.")
+                        return fallback_result
                 else:
-                    logger.warning("Decomposition JSON parsed, but missing 'sub_prompts' key or wrong structure. Falling back.")
-                    return [user_prompt]
+                    logger.warning("Decomposition JSON parsed, but missing 'decomposition' key or wrong structure. Falling back.")
+                    return fallback_result
 
             except json.JSONDecodeError as json_err:
                 logger.error(f"Failed to parse decomposition response as JSON: {json_err}. Raw response: {response_content}")
                 logger.warning("Falling back to using the original prompt.")
-                return [user_prompt]
+                return fallback_result
 
         except TimeoutError:
             logger.error(f"Prompt decomposition request timed out. Falling back to original prompt.")
-            return [user_prompt]
+            return fallback_result
         except Exception as e:
             logger.error(f"Error during prompt decomposition LLM call: {str(e)}", exc_info=True)
             logger.warning("Falling back to using the original prompt.")
-            return [user_prompt]
+            return fallback_result
 
 
     @property
@@ -469,34 +507,39 @@ Example JSON Output:
                 # Return a structured message indicating skipped analysis for this sub-prompt
                 return json.dumps(
                     {
-                        # Use a generic title, aggregation will handle overall title
-                        "title": f"Analysis Skipped for Sub-Prompt",
-                        "analysis_sections": {
-                            f"info_skipped_rag": { # Use a unique key based on sub-prompt? Or let aggregation handle it?
-                                "Analysis": f"Analysis skipped for sub-prompt '{sub_prompt}' because no relevant text sections were identified.",
-                                "Supporting_Phrases": ["No relevant phrase found."],
-                                "Context": "RAG Retrieval Found No Matches",
-                            }
-                        },
+                        "sub_prompt_analyzed": sub_prompt,
+                        "analysis_summary": f"Analysis skipped for sub-prompt '{sub_prompt}' because no relevant text sections were identified.",
+                        "supporting_quotes": ["No relevant phrase found."],
+                        "analysis_context": "RAG Retrieval Found No Matches"
                     },
                     indent=2,
                 )
 
-            schema_str = json.dumps(self.output_schema_analysis, indent=2)
+            # New simplified schema directly in the prompt
+            simplified_schema = {
+                "sub_prompt_analyzed": "The exact sub-prompt being analyzed",
+                "analysis_summary": "Detailed analysis directly answering the sub-prompt...",
+                "supporting_quotes": [
+                    "Exact quote 1 from the document text...",
+                    "Exact quote 2, potentially longer..."
+                ],
+                "analysis_context": "Optional context about the analysis (e.g., document section names)"
+            }
+
+            schema_str = json.dumps(simplified_schema, indent=2)
 
             # ***** MODIFIED SYSTEM PROMPT FOR RAG & SUB-PROMPT *****
-            system_prompt = f"""You are an intelligent document analyser specializing in legal and financial documents. You will be given **relevant excerpts** from a document, identified based on a SPECIFIC USER SUB-PROMPT. Your task is to analyze ONLY these provided excerpts based ONLY on the given SUB-PROMPT and provide structured output following a specific JSON schema.
+            system_prompt = f"""You are an intelligent document analyser specializing in legal and financial documents. You will be given **relevant excerpts** from a document, identified based on a SPECIFIC USER SUB-PROMPT. Your task is to analyze ONLY these provided excerpts based ONLY on the given SUB-PROMPT and provide a SINGLE, FOCUSED analysis following a specific JSON schema.
 
 ### Core Instructions:
 1.  **Focus on the Sub-Prompt:** Your entire analysis must address *only* the specific user SUB-PROMPT provided below. Ignore information in the excerpts not relevant to this particular sub-prompt.
 2.  **Analyze Thoroughly:** Read the sub-prompt and the document excerpts carefully. Perform the requested analysis based *only* on the excerpts.
 3.  **Strict JSON Output:** Your entire response MUST be a single JSON object matching the schema provided below. Do not include any introductory text, explanations, apologies, or markdown formatting (` ```json`, ` ``` `) outside the JSON structure.
-4.  **Specific Title:** The `title` field in the JSON should be a concise title summarizing the analysis performed for *this specific sub-prompt*.
-5.  **Descriptive Section Names:** Use lowercase snake_case for keys within `analysis_sections` (e.g., `cancellation_rights`, `liability_limitations`). These names should accurately reflect the content of the analysis *for this sub-prompt*. Try to make them unique and descriptive.
-6.  **Exact Supporting Phrases:** The `Supporting_Phrases` array must contain *only direct, verbatim quotes* from the 'Relevant Document Excerpts'. Preserve original case, punctuation, and formatting. Do *not* include excerpt metadata (Chunk ID/Page/Score) in the quotes. Aim for complete sentences or meaningful clauses.
-7.  **No Phrase Found:** If no relevant phrase *within the provided excerpts* directly supports an analysis point for a section, include the exact string "No relevant phrase found." in the `Supporting_Phrases` array for that section.
-8.  **Focus *Only* on Excerpts:** Base your analysis *exclusively* on the text provided under '### Relevant Document Excerpts:'. Do not infer information not present in these specific excerpts.
-9.  **Context Field:** Optionally use the `Context` field to note which sub-prompt this analysis addresses.
+4.  **Direct Answer:** Provide a *single, comprehensive analysis* that directly answers the sub-prompt. DO NOT break down your response into multiple sections or categories.
+5.  **Exact Supporting Quotes:** The `supporting_quotes` array must contain *only direct, verbatim quotes* from the 'Relevant Document Excerpts'. Preserve original case, punctuation, and formatting. Do *not* include excerpt metadata (Chunk ID/Page/Score) in the quotes. Aim for complete sentences or meaningful clauses.
+6.  **No Quote Found:** If no relevant phrase *within the provided excerpts* directly supports your analysis, include the exact string "No relevant phrase found." in the `supporting_quotes` array.
+7.  **Focus *Only* on Excerpts:** Base your analysis *exclusively* on the text provided under '### Relevant Document Excerpts:'. Do not infer information not present in these specific excerpts.
+8.  **Context Field:** Optionally use the `analysis_context` field to note the relevant section of the document.
 
 ### JSON Output Schema:
 ```json
@@ -517,7 +560,7 @@ Relevant Document Excerpts (Identified for the sub-prompt above):
 {relevant_document_text}
 --- END EXCERPTS ---
 
-Generate the analysis and supporting phrases strictly following the JSON schema provided in the system instructions. Ensure the analysis *only* addresses the sub-prompt and supporting phrases are exact quotes from the TEXT portion of the excerpts provided above."""
+Generate a SINGLE, FOCUSED analysis that directly answers the sub-prompt, strictly following the JSON schema provided in the system instructions. Ensure the analysis *only* addresses this specific sub-prompt and supporting quotes are exact quotes from the TEXT portion of the excerpts provided above."""
 
             messages = [
                 {"role": "system", "content": system_prompt},
@@ -550,20 +593,30 @@ Generate the analysis and supporting phrases strictly following the JSON schema 
                 parsed_json = json.loads(json_str)
 
                 # Basic Schema Validation
-                if "analysis_sections" not in parsed_json or not isinstance(parsed_json.get("analysis_sections"), dict):
-                    logger.error("AI analysis response missing 'analysis_sections' dict.")
-                    # Attempt to salvage if possible, otherwise raise
-                    if isinstance(parsed_json, dict):
-                        parsed_json["analysis_sections"] = {
-                            "error_parsing": {
-                                "Analysis": "Failed to find valid 'analysis_sections' in AI response.",
-                                "Supporting_Phrases": ["No relevant phrase found."],
-                                "Context": f"Problem with sub-prompt: {sub_prompt}",
-                            }
-                        }
-                        logger.warning("Salvaged analysis response by adding error section.")
-                    else:
-                         raise ValueError("AI response missing 'analysis_sections' dict and not salvageable.")
+                if not isinstance(parsed_json, dict):
+                    raise ValueError("AI response is not a valid JSON object.")
+                
+                # Check for required fields in new schema
+                required_fields = ["sub_prompt_analyzed", "analysis_summary", "supporting_quotes"]
+                missing_fields = [field for field in required_fields if field not in parsed_json]
+                
+                if missing_fields:
+                    logger.error(f"AI analysis response missing required fields: {missing_fields}")
+                    # Attempt to salvage if possible
+                    for field in missing_fields:
+                        if field == "sub_prompt_analyzed":
+                            parsed_json["sub_prompt_analyzed"] = sub_prompt
+                        elif field == "analysis_summary":
+                            parsed_json["analysis_summary"] = "Failed to generate analysis for this sub-prompt."
+                        elif field == "supporting_quotes":
+                            parsed_json["supporting_quotes"] = ["No relevant phrase found."]
+                    
+                    logger.warning(f"Salvaged analysis response by adding missing fields: {missing_fields}")
+                
+                # Ensure supporting_quotes is a list
+                if not isinstance(parsed_json.get("supporting_quotes", []), list):
+                    parsed_json["supporting_quotes"] = ["No relevant phrase found."]
+                    logger.warning("Converted non-list supporting_quotes to default list.")
 
                 logger.info(f"Successfully parsed AI analysis JSON for sub-prompt '{sub_prompt[:50]}...'.")
                 return json.dumps(parsed_json, indent=2)
@@ -573,41 +626,29 @@ Generate the analysis and supporting phrases strictly following the JSON schema 
                 logger.error(f"Raw response content was:\n{response_content}")
                 # Return error JSON
                 error_response = {
-                    "title": f"Error Processing Sub-Prompt",
-                    "analysis_sections": {
-                        f"error_json_parsing": {
-                            "Analysis": f"Failed to parse AI response as JSON. Error: {json_err}. See logs for raw response.",
-                            "Supporting_Phrases": ["No relevant phrase found."],
-                            "Context": f"Sub-prompt: {sub_prompt}",
-                        }
-                    },
+                    "sub_prompt_analyzed": sub_prompt,
+                    "analysis_summary": f"Failed to parse AI response as JSON. Error: {json_err}. See logs for raw response.",
+                    "supporting_quotes": ["No relevant phrase found."],
+                    "analysis_context": "JSON Parsing Error"
                 }
                 return json.dumps(error_response, indent=2)
             except ValueError as val_err:
                 logger.error(f"Error validating AI analysis response structure for sub-prompt '{sub_prompt[:50]}...': {val_err}")
                 error_response = {
-                    "title": f"Error Processing Sub-Prompt",
-                    "analysis_sections": {
-                        f"error_validation": {
-                            "Analysis": f"AI response structure validation failed: {val_err}",
-                            "Supporting_Phrases": ["No relevant phrase found."],
-                            "Context": f"Sub-prompt: {sub_prompt}",
-                        }
-                    },
+                    "sub_prompt_analyzed": sub_prompt,
+                    "analysis_summary": f"AI response structure validation failed: {val_err}",
+                    "supporting_quotes": ["No relevant phrase found."],
+                    "analysis_context": "Validation Error"
                 }
                 return json.dumps(error_response, indent=2)
 
         except TimeoutError:
              logger.error(f"AI analysis request timed out for sub-prompt '{sub_prompt[:50]}...' in {filename}.")
              error_response = {
-                "title": f"Timeout Error Processing Sub-Prompt",
-                "analysis_sections": {
-                    f"error_timeout": {
-                        "Analysis": f"The analysis request for this sub-prompt timed out.",
-                        "Supporting_Phrases": ["No relevant phrase found."],
-                        "Context": f"Sub-prompt: {sub_prompt}",
-                    }
-                },
+                "sub_prompt_analyzed": sub_prompt,
+                "analysis_summary": f"The analysis request for this sub-prompt timed out.",
+                "supporting_quotes": ["No relevant phrase found."],
+                "analysis_context": "Request Timeout"
              }
              return json.dumps(error_response, indent=2)
 
@@ -617,14 +658,10 @@ Generate the analysis and supporting phrases strictly following the JSON schema 
                 exc_info=True,
             )
             error_response = {
-                "title": f"Error Analyzing Sub-Prompt",
-                "analysis_sections": {
-                    f"error_general_analysis": {
-                        "Analysis": f"An unexpected error occurred during analysis: {str(e)}",
-                        "Supporting_Phrases": ["No relevant phrase found."],
-                        "Context": f"Sub-prompt: {sub_prompt} / System Error",
-                    }
-                },
+                "sub_prompt_analyzed": sub_prompt,
+                "analysis_summary": f"An unexpected error occurred during analysis: {str(e)}",
+                "supporting_quotes": ["No relevant phrase found."],
+                "analysis_context": "System Error"
             }
             return json.dumps(error_response, indent=2)
 
@@ -779,7 +816,8 @@ class PDFProcessor:
                  if section_key.startswith("info_skipped_") or section_key.startswith("error_"):
                      continue
                  if isinstance(section_data, dict):
-                    phrases = section_data.get("Supporting_Phrases", [])
+                    # Check for both old and new field names for supporting phrases
+                    phrases = section_data.get("Supporting_Phrases", section_data.get("supporting_quotes", []))
                     if isinstance(phrases, list):
                         for phrase in phrases:
                             p_text = ""
@@ -1152,7 +1190,7 @@ def display_analysis_results(analysis_results: List[Dict[str, Any]]):
         logger.info("No analysis results to display.")
         return
 
-    analysis_col, pdf_col = st.columns([2.5, 1.5], gap="medium")
+    analysis_col, pdf_col = st.columns([2.5, 1.5], gap="small")
 
     with analysis_col:
         st.markdown("### AI Analysis Results")
@@ -1231,13 +1269,13 @@ def display_analysis_results(analysis_results: List[Dict[str, Any]]):
                     display_section_name = section_key.replace("_", " ").title()
 
                     with st.container(border=True):
-                        st.subheader(display_section_name)
+                        st.markdown(f"##### {display_section_name}")
                         if section_data.get("Analysis"):
                             st.markdown(section_data["Analysis"], unsafe_allow_html=False)
                         if section_data.get("Context"):
                             st.caption(f"Context: {section_data['Context']}")
 
-                        supporting_phrases = section_data.get("Supporting_Phrases", [])
+                        supporting_phrases = section_data.get("Supporting_Phrases", section_data.get("supporting_quotes", []))
                         if not isinstance(supporting_phrases, list): supporting_phrases = []
 
                         if supporting_phrases:
@@ -1258,7 +1296,7 @@ def display_analysis_results(analysis_results: List[Dict[str, Any]]):
                                     method_info = f"{best_location['method']}" if best_location and "method" in best_location else ""
                                     page_info = f"Pg {best_location['page_num'] + 1}" if best_location and "page_num" in best_location else ""
 
-                                    cite_col, btn_col = st.columns([0.8, 0.2], gap="small")
+                                    cite_col, btn_col = st.columns([0.90, 0.10], gap="small")
                                     with cite_col:
                                         st.markdown(f"""
                                             <div style="border: 1px solid #e0e0e0; border-radius: 5px; padding: 8px 12px; margin-bottom: 8px; background-color: #f9f9f9;">
@@ -1297,8 +1335,8 @@ def display_analysis_results(analysis_results: List[Dict[str, Any]]):
         st.markdown("### Analysis Tools & PDF Viewer")
 
         # --- Chat Interface Expander ---
-        # with st.expander("💬 SmartChat (Beta)", expanded=False):
-        #     st.info("Chat feature placeholder.")
+        with st.expander("💬 SmartChat (Beta)", expanded=False):
+            st.info("Chat feature placeholder.")
 
         # --- Export Expander ---
         with st.expander("📊 Export Results", expanded=False):
@@ -1319,7 +1357,7 @@ def display_analysis_results(analysis_results: List[Dict[str, Any]]):
                             continue # Skip non-dict or placeholder sections for export
                         analysis = sec_data.get("Analysis", "")
                         context = sec_data.get("Context", "")
-                        phrases = sec_data.get("Supporting_Phrases", [])
+                        phrases = sec_data.get("Supporting_Phrases", sec_data.get("supporting_quotes", []))
                         if not isinstance(phrases, list): phrases = []
 
                         if not phrases or phrases == ["No relevant phrase found."]:
@@ -1381,71 +1419,84 @@ def display_analysis_results(analysis_results: List[Dict[str, Any]]):
 # --- Main Application Logic ---
 
 def aggregate_analysis_results(
-    individual_results: List[str], # List of JSON strings from analyze_document
+    individual_results: List[Tuple[str, str, str]], # List of (title, sub_prompt, analysis_json_str) tuples
     original_filename: str,
     original_prompt: str
     ) -> str: # Returns single aggregated JSON string
     """Merges JSON results from multiple sub-prompt analyses into one."""
     final_analysis = {
-        # Create a more generic title, or try to extract from first valid result
-        "title": f"Aggregated Analysis for {original_filename}",
+        "title": f"Aggregated Analysis for {original_filename}", # Default title
         "analysis_sections": {}
     }
-    found_valid_title = False
+    found_valid_title = False # Tracks if we set a better overall title
 
-    for i, json_str in enumerate(individual_results):
+    for i, (task_title, sub_prompt, analysis_json_str) in enumerate(individual_results):
         try:
-            parsed_result = json.loads(json_str)
+            parsed_result = json.loads(analysis_json_str)
             if not isinstance(parsed_result, dict):
                  logger.warning(f"Sub-analysis result {i} is not a dict, skipping.")
-                 # Add error section to final output?
                  final_analysis["analysis_sections"][f"error_aggregation_invalid_format_{i}"] = {
-                     "Analysis": f"Result from sub-analysis {i+1} was not in the expected dictionary format.",
-                     "Supporting_Phrases": [], "Context": "Aggregation Error"
+                     "Analysis": f"Result from sub-analysis {i+1} (Prompt: '{sub_prompt[:50]}...') was not in the expected dictionary format.",
+                     "Supporting_Phrases": ["No relevant phrase found."],
+                     "Context": "Aggregation Error"
                  }
                  continue
 
-            # Try to get the title from the first valid result
-            if not found_valid_title and parsed_result.get("title") and "error" not in parsed_result.get("title", "").lower():
-                final_analysis["title"] = parsed_result["title"]
+            # Extract fields from the simplified schema returned by analyze_document
+            analysis_summary = parsed_result.get("analysis_summary", "No analysis provided.")
+            supporting_quotes = parsed_result.get("supporting_quotes", ["No relevant phrase found."])
+            analysis_context = parsed_result.get("analysis_context", "") # Context from analysis LLM
+
+            # --- Use the AI-generated title to create the section key ---
+            # Clean up the AI-generated title to create a valid snake_case key
+            section_key = re.sub(r'[^a-zA-Z0-9]', '_', task_title.lower()) # Use task_title
+            section_key = re.sub(r'_+', '_', section_key)  # Replace multiple underscores
+            section_key = section_key.strip('_')[:60]  # Limit length and remove leading/trailing
+
+            if not section_key: # Fallback if title was empty or only symbols
+                section_key = f"sub_prompt_{i+1}"
+
+            # Add a numeric suffix if the key already exists (handles duplicate titles)
+            base_key = section_key
+            counter = 1
+            while section_key in final_analysis["analysis_sections"]:
+                section_key = f"{base_key}_{counter}"
+                counter += 1
+
+            # Create the section with the proper format expected by the display logic
+            # Include the original sub-prompt in the context for clarity
+            final_analysis["analysis_sections"][section_key] = {
+                "Analysis": analysis_summary,
+                "Supporting_Phrases": supporting_quotes,
+                "Context": f"AI Title: '{task_title}' | Sub-prompt: '{sub_prompt}'" + (f" | LLM Context: {analysis_context}" if analysis_context else "")
+            }
+
+            # Set a better overall title if we haven't yet and this is the first valid analysis
+            if not found_valid_title and analysis_summary and "error" not in analysis_summary.lower() and "skipped" not in analysis_summary.lower():
+                final_analysis["title"] = f"Analysis of {original_filename}"
                 found_valid_title = True
 
-            # Merge analysis sections
-            sub_sections = parsed_result.get("analysis_sections", {})
-            if isinstance(sub_sections, dict):
-                for section_key, section_data in sub_sections.items():
-                    # Make keys unique if necessary (e.g., prefix with sub-prompt index)
-                    # Simple approach: just merge. If keys clash, last one wins.
-                    # More robust: check for key existence and rename? e.g., f"{section_key}_{i}"
-                    # Current approach: direct merge, hoping LLM creates distinct keys based on sub-prompt.
-                    # Add error/info sections directly
-                    final_analysis["analysis_sections"][section_key] = section_data
-            else:
-                 logger.warning(f"Sub-analysis result {i} has invalid 'analysis_sections', skipping section merge.")
-                 final_analysis["analysis_sections"][f"error_aggregation_bad_sections_{i}"] = {
-                     "Analysis": f"Result from sub-analysis {i+1} had an invalid 'analysis_sections' format (expected dict).",
-                     "Supporting_Phrases": [], "Context": "Aggregation Error"
-                 }
-
-
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON for sub-analysis result {i}: {e}")
+            logger.error(f"Failed to parse JSON for sub-analysis result {i} (Prompt: '{sub_prompt[:50]}...'): {e}")
             final_analysis["analysis_sections"][f"error_aggregation_json_decode_{i}"] = {
-                "Analysis": f"Failed to parse JSON output from sub-analysis {i+1}. Error: {e}",
-                "Supporting_Phrases": [], "Context": "Aggregation Error"
+                "Analysis": f"Failed to parse JSON output from sub-analysis {i+1} (Prompt: '{sub_prompt[:50]}...'). Error: {e}",
+                "Supporting_Phrases": ["No relevant phrase found."],
+                "Context": "Aggregation Error"
             }
         except Exception as e:
-            logger.error(f"Unexpected error aggregating sub-analysis result {i}: {e}", exc_info=True)
+            logger.error(f"Unexpected error aggregating sub-analysis result {i} (Prompt: '{sub_prompt[:50]}...'): {e}", exc_info=True)
             final_analysis["analysis_sections"][f"error_aggregation_unexpected_{i}"] = {
-                "Analysis": f"Unexpected error processing result from sub-analysis {i+1}. Error: {e}",
-                "Supporting_Phrases": [], "Context": "Aggregation Error"
+                "Analysis": f"Unexpected error processing result from sub-analysis {i+1} (Prompt: '{sub_prompt[:50]}...'). Error: {e}",
+                "Supporting_Phrases": ["No relevant phrase found."],
+                "Context": "Aggregation Error"
             }
 
-    # If no valid title was found after aggregation, use the default
+    # If no valid title was found after aggregation, adjust the default
     if not found_valid_title and not final_analysis["analysis_sections"]:
         final_analysis["title"] = f"Analysis Failed for {original_filename}"
     elif not found_valid_title:
-         final_analysis["title"] = f"Aggregated Analysis for {original_filename} (Generated Title)"
+         # Keep the default or maybe indicate issues
+         final_analysis["title"] = f"Aggregated Analysis for {original_filename} (Check Sections)"
 
 
     return json.dumps(final_analysis, indent=2)
@@ -1498,25 +1549,29 @@ def process_file_wrapper(args):
         analyzer = DocumentAnalyzer()
 
         # --- Step 1: Decompose Prompt ---
+        decomposed_tasks = [] # Will store list of dicts: {'title': ..., 'sub_prompt': ...}
         try:
-            sub_prompts = run_async(analyzer.decompose_prompt(user_prompt))
-            # Simple fallback: If decomposition returns empty list, or only one item very similar to original, use original.
-            if not sub_prompts or (len(sub_prompts) == 1 and fuzz.ratio(sub_prompts[0], user_prompt) > 95):
-                logger.info(f"Decomposition resulted in one prompt similar to original, or failed. Processing original prompt for {filename}.")
-                sub_prompts = [user_prompt]
+            decomposed_tasks = run_async(analyzer.decompose_prompt(user_prompt))
+            # Check if fallback occurred (returns list with one item and default title)
+            if len(decomposed_tasks) == 1 and decomposed_tasks[0]['title'] == "Overall Analysis":
+                 logger.info(f"Decomposition failed or resulted in single prompt. Processing original prompt for {filename}.")
+                 # Keep the single item in decomposed_tasks
             else:
-                 logger.info(f"Decomposed prompt for {filename} into {len(sub_prompts)} sub-prompts.")
+                 logger.info(f"Decomposed prompt for {filename} into {len(decomposed_tasks)} sub-prompts with titles.")
         except Exception as decomp_err:
             logger.error(f"Prompt decomposition failed for {filename}: {decomp_err}. Processing original prompt as fallback.", exc_info=True)
-            sub_prompts = [user_prompt] # Fallback
+            decomposed_tasks = [{"title": "Overall Analysis", "sub_prompt": user_prompt}] # Fallback
 
-        individual_analysis_results = []
+        # Change structure: List of (title, sub_prompt, analysis_json_str) tuples
+        individual_analysis_results: List[Tuple[str, str, str]] = []
         all_relevant_chunk_ids = set() # Use set for automatic deduplication
 
         # --- Steps 2 & 3: Loop - Targeted RAG & Focused Analysis per Sub-Prompt ---
-        for i, sub_prompt in enumerate(sub_prompts):
+        for i, task in enumerate(decomposed_tasks):
              sub_start_time = datetime.now()
-             logger.info(f"Processing sub-prompt {i+1}/{len(sub_prompts)} for {filename}: '{sub_prompt[:80]}...'")
+             task_title = task['title']
+             sub_prompt = task['sub_prompt']
+             logger.info(f"Processing sub-task {i+1}/{len(decomposed_tasks)} for {filename}: Title='{task_title}', Prompt='{sub_prompt[:60]}...'")
 
              # Step 2: RAG for this sub-prompt
              relevant_text, relevant_chunk_ids = retrieve_relevant_chunks(
@@ -1525,19 +1580,19 @@ def process_file_wrapper(args):
              all_relevant_chunk_ids.update(relevant_chunk_ids) # Add retrieved chunks to the set
 
              # Step 3: AI Analysis for this sub-prompt
-             # Use run_async correctly here
              analysis_json_str = run_async(
                  analyzer.analyze_document(relevant_text, filename, sub_prompt)
              )
-             individual_analysis_results.append(analysis_json_str)
+             # Append title, sub_prompt, and result
+             individual_analysis_results.append((task_title, sub_prompt, analysis_json_str))
              sub_elapsed = (datetime.now() - sub_start_time).total_seconds()
-             logger.info(f"Sub-prompt {i+1}/{len(sub_prompts)} completed in {sub_elapsed:.2f}s")
+             logger.info(f"Sub-task {i+1}/{len(decomposed_tasks)} completed in {sub_elapsed:.2f}s")
 
 
         # --- Step 4: Aggregate Results ---
         logger.info(f"Aggregating {len(individual_analysis_results)} analysis results for {filename}.")
         aggregated_ai_analysis_json_str = aggregate_analysis_results(
-            individual_analysis_results, filename, user_prompt
+            individual_analysis_results, filename, user_prompt # Pass the modified list
         )
 
         # --- Step 5: Verification & Annotation (on aggregated results) ---
@@ -1642,8 +1697,8 @@ def display_page():
 
 
     # --- Analysis Inputs ---
-    with st.container(border=True):
-        st.subheader("Analysis Configuration")
+    with st.container(border=False):
+        # st.subheader("Ask SmartDocs")
         st.session_state.user_prompt = st.text_area(
             "Analysis Prompt",
             placeholder="Enter your analysis instructions. Multiple questions or tasks will be handled separately (e.g., 'What is the termination clause? What are the liability limits?')",
@@ -1701,7 +1756,7 @@ def display_page():
                     f"Processing {files_to_run_count} document(s)... "
                     "(Decomposing Prompt, Retrieving Chunks per Sub-Prompt, Analyzing)"
                  )
-                with st.spinner(spinner_msg):
+                with st.spinner(spinner_msg, show_time=True):
                     processed_indices = set()
 
                     def run_task_with_index(item_index: int, args_tuple: tuple):
