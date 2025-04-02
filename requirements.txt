@@ -1,12 +1,15 @@
 streamlit
-fitz  # PyMuPDF
-pdfplumber # For PDF viewer rendering
+PyMuPDF
+pdfplumber
 openai
+python-dotenv
 langchain
-pandas
-dotenv
+google-generativeai
 thefuzz
 python-docx
-PyMuPDF
+pandas
 openpyxl
-python-docx
+sentence-transformers
+numpy
+torch
+# Add specific versions if needed, e.g., streamlit>=1.30.0
