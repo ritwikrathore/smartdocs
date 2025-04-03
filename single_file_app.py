@@ -45,6 +45,7 @@ MAX_WORKERS = int(os.environ.get("MAX_WORKERS", 4))
 ENABLE_PARALLEL = os.environ.get("ENABLE_PARALLEL", "true").lower() == "true"
 FUZZY_MATCH_THRESHOLD = 88  # Adjust this threshold (0-100)
 RAG_TOP_K = 10 # Number of relevant chunks to retrieve per sub-prompt (Adjusted from 15)
+LOCAL_EMBEDDING_MODEL_PATH = "./embedding_model_local"
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"  # Smaller, faster model for embeddings
 # Consider using a faster/cheaper model for decomposition if latency is an issue
 DECOMPOSITION_MODEL_NAME = "gemini-1.5-flash"
@@ -55,20 +56,22 @@ ANALYSIS_MODEL_NAME = "gemini-2.0-flash"
 def load_embedding_model():
     """Loads the SentenceTransformer model and caches it."""
     model = None
+    if not os.path.exists(LOCAL_EMBEDDING_MODEL_PATH) or not os.path.isdir(LOCAL_EMBEDDING_MODEL_PATH):
+        logger.error(f"Local embedding model directory not found at: {LOCAL_EMBEDDING_MODEL_PATH}")
+        st.error(f"Fatal Error: Embedding model not found at the required local path ({LOCAL_EMBEDDING_MODEL_PATH}). Please ensure the model directory is present.")
+        # Depending on requirements, you might raise an Exception or return None carefully
+        return None # Stop the app if the local model is essential
+
     try:
         logger.info(f"Loading embedding model: {EMBEDDING_MODEL_NAME}...")
         # Check for CUDA availability, fallback to CPU if needed
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = SentenceTransformer(EMBEDDING_MODEL_NAME, device=device)
-        logger.info(f"Embedding model loaded successfully on device: {device}")
+        model = SentenceTransformer(LOCAL_EMBEDDING_MODEL_PATH)
+        logger.info("Embedding model loaded successfully from local path.")
     except Exception as e:
-        logger.error(f"Failed to load embedding model: {e}", exc_info=True)
-        st.error(
-            f"Fatal Error: Could not load embedding model '{EMBEDDING_MODEL_NAME}'. "
-            "Document processing is disabled. Please check installation and dependencies."
-        )
-        # Return None or raise an exception if loading fails critically
-        model = None
+        logger.error(f"Error loading embedding model from {LOCAL_EMBEDDING_MODEL_PATH}: {e}", exc_info=True)
+        st.error(f"Failed to load the embedding model from the local path. Error: {e}")
+        model = None # Ensure model is None on error
     return model
 
 # Load the model using the cached function
