@@ -1244,7 +1244,32 @@ def display_analysis_results(analysis_results: List[Dict[str, Any]]):
             phrase_locations = result.get("phrase_locations", {})
             annotated_pdf_b64 = result.get("annotated_pdf")
 
-            st.markdown(f"--- \n#### {filename}")
+            st.markdown(f"---") # Keep the divider separate
+
+            # --- Filename Title and Download Button ---
+            title_col, button_col = st.columns([0.85, 0.15], gap="small", vertical_alignment="bottom")
+            with title_col:
+                st.markdown(f"##### {filename}")
+
+            with button_col:
+                if annotated_pdf_b64:
+                    try:
+                        annotated_pdf_bytes = base64.b64decode(annotated_pdf_b64)
+                        download_key = f"download_{filename}" # Unique key
+                        st.download_button(
+                            label="💾 PDF", # Short label
+                            data=annotated_pdf_bytes,
+                            file_name=f"annotated_{filename}",
+                            mime="application/pdf",
+                            key=download_key,
+                            help=f"Download annotated PDF for {filename}",
+                            use_container_width=True,
+                        )
+                    except Exception as decode_err:
+                        logger.error(f"Failed to decode annotated PDF for download button ({filename}): {decode_err}")
+                        st.caption("DL Err") # Short error indicator
+                else:
+                    st.caption("No PDF") # Indicate no PDF available
 
             try:
                 # Use the already parsed aggregated_analysis_data
@@ -1661,7 +1686,7 @@ def display_page():
 
     # --- UI Layout ---
     st.markdown(
-        "<h1 style='text-align: center;'>SmartDocs Document Analysis (Decomposition Enabled)</h1>",
+        "<h1 style='text-align: center;'>SmartDocs (RAG + Decomposition Enabled)</h1>",
         unsafe_allow_html=True,
     )
     st.markdown(

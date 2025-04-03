@@ -2,7 +2,9 @@
 
 ## Project Description
 
-SmartDocs is a web-based application built with Streamlit designed for intelligent analysis of PDF and DOCX documents. It leverages Large Language Models (LLMs) like Google's Gemini, combined with Retrieval-Augmented Generation (RAG), to provide focused answers to user queries about document content. A key feature is its ability to decompose complex user prompts into smaller, manageable sub-questions, allowing for more granular and accurate analysis of specific document sections.
+SmartDocs is a web-based application built with Streamlit designed for intelligent analysis of PDF and DOCX documents. It leverages Large Language Models (LLMs) like Google's Gemini, combined with Retrieval-Augmented Generation (RAG), to provide focused answers to user queries about document content. A key feature is its ability to decompose complex user prompts into smaller, manageable sub-questions, allowing for more granular and accurate analysis of specific document sections and generating citations.
+
+Try it out: https://smartdocs.streamlit.app/
 
 ## Key Features
 
