@@ -42,7 +42,6 @@ Try it out: https://smartdocs.streamlit.app/
     ```bash
     pip install -r requirements.txt
     ```
-    *(Note: Ensure `requirements.txt` is present and up-to-date. You might need to create it using `pip freeze > requirements.txt` if it doesn't exist).*
 
 ## Configuration
 
@@ -91,7 +90,7 @@ The application uses environment variables for configuration.
 1.  Enable chat mode for the application. (Import from old app, enable multi pdf chat, etc.)
 2.  Enable Report Issue feature.
 3.  Export the analysis results to a PDF file / Word document. (Check existing functionality.)
-4.  Export Annotated PDF.
+4.  E̶x̶p̶o̶r̶t̶ ̶A̶n̶n̶o̶t̶a̶t̶e̶d̶ ̶P̶D̶F̶.̶
 5.  UI/UX Improvements (PDF Title, App Title, Logos, Container Styling, etc.)
 6.  Refactor the code to make it more modular and easier to maintain. (Break down the `single_file_app.py` into smaller functions and classes.)
 7.  Bring the Title page to the top, it slides down after analysis.
