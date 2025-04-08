@@ -18,13 +18,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import fitz  # PyMuPDF
-import google.generativeai as genai  # Keeping for reference
 import numpy as np
 import pandas as pd
 import pdfplumber  # For PDF viewer rendering - Can likely be removed if fitz rendering is stable
 import streamlit as st
 import torch  # Usually implicitly required by sentence-transformers
 from docx import Document as DocxDocument  # Renamed to avoid conflict
+from docx import Document # Import for Word export
+from docx.shared import Pt, RGBColor # Import for Word export styling
+from docx.enum.text import WD_ALIGN_PARAGRAPH # Import for Word export alignment
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer, util
 from thefuzz import fuzz
@@ -39,7 +41,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # ****** SET PAGE CONFIG HERE (First Streamlit command) ******
-st.set_page_config(layout="wide", page_title="SmartDocs Analysis")
+st.set_page_config(layout="wide", page_title="CNT SmartDocs")
 # ****** END SET PAGE CONFIG ******
 
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", 4))
@@ -49,10 +51,6 @@ RAG_TOP_K = 10 # Number of relevant chunks to retrieve per sub-prompt (Adjusted 
 LOCAL_EMBEDDING_MODEL_PATH = "./embedding_model_local"
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"  # Smaller, faster model for embeddings
 # Consider using a faster/cheaper model for decomposition if latency is an issue
-
-# --- Comment out Google models and add Azure OpenAI configuration ---
-# DECOMPOSITION_MODEL_NAME = "gemini-1.5-flash"
-# ANALYSIS_MODEL_NAME = "gemini-2.0-flash"
 
 # Using Azure OpenAI instead
 DECOMPOSITION_MODEL_NAME = "gpt-4o"  # Using the deployment name from secrets
@@ -455,27 +453,6 @@ class DocumentAnalyzer:
                     f"with deployment: {azure_deployment}"
                 )
                 
-                # --- Original Google Gemini Configuration (Commented Out) ---
-                # The block below is properly commented out to prevent it from being displayed or executed
-                # '''
-                # if hasattr(st, "secrets") and "GOOGLE_API_KEY" in st.secrets:
-                #     api_key = st.secrets["GOOGLE_API_KEY"]
-                #     logger.info(f"Using Google API key from Streamlit secrets for model {model_name}.")
-                # else:
-                #     api_key = os.getenv("GOOGLE_API_KEY")
-                #     if not api_key:
-                #         raise ValueError("Google API Key is missing.")
-                #     logger.info(f"Using Google API key from environment variable for model {model_name}.")
-
-                # genai.configure(api_key=api_key)
-                # # Create the specific model instance
-                # _thread_local.google_clients[model_name] = genai.GenerativeModel(model_name)
-                # logger.info(
-                #     f"Initialized Google GenAI client for thread {threading.current_thread().name} "
-                #     f"with model: {model_name}"
-                # )
-                # '''
-
             except Exception as e:
                 logger.error(f"Error initializing AI client for model {model_name}: {str(e)}")
                 raise
@@ -522,61 +499,6 @@ class DocumentAnalyzer:
             # logger.debug(f"Raw Azure OpenAI ({deployment}) response content: {content}")
             return content
             
-            # --- Original Google Gemini API Call (Commented Out) ---
-            '''
-            client = self._ensure_client(model_name)
-            history = []
-            system_instruction = None
-            for msg in messages:
-                role = msg.get("role")
-                content = msg.get("content")
-                if role == "system":
-                    system_instruction = content
-                elif role == "user":
-                    history.append({"role": "user", "parts": [{"text": content}]})
-                elif role == "assistant" or role == "model":
-                    history.append({"role": "model", "parts": [{"text": content}]})
-
-            # Prepend system instruction if provided
-            if system_instruction:
-                 if history and history[0]['role'] == 'user':
-                      history[0]['parts'][0]['text'] = f"{system_instruction}\n\n---\n\n{history[0]['parts'][0]['text']}"
-                      logger.debug(f"Prepending system prompt to first user message for model {model_name}.")
-                 else:
-                      history.insert(0, {'role': 'user', 'parts': [{'text': system_instruction}]})
-                      logger.debug(f"Inserting system prompt as first user message for model {model_name}.")
-
-            logger.info(f"Sending request to Google model: {client.model_name}")
-            # logger.debug(f"Formatted history for Google API ({client.model_name}): {json.dumps(history, indent=2)}")
-
-            response = await client.generate_content_async(
-                history,
-                generation_config=genai.types.GenerationConfig(
-                    max_output_tokens=8192, # Keep high for analysis
-                    temperature=0.1, # Keep low for factual tasks
-                ),
-                request_options={'timeout': 300} # Add timeout (in seconds)
-            )
-
-            if not response.candidates:
-                safety_info = (
-                    response.prompt_feedback
-                    if hasattr(response, "prompt_feedback")
-                    else "No specific feedback."
-                )
-                logger.error(
-                    f"Google API ({client.model_name}) returned no candidates. Possibly blocked. Feedback: {safety_info}"
-                )
-                raise ValueError(
-                    f"Google API ({client.model_name}) returned no candidates. Content may have been blocked. Feedback: {safety_info}"
-                )
-
-            content = response.text
-            logger.info(f"Received response from Google model {client.model_name}")
-            # logger.debug(f"Raw Google API ({client.model_name}) response content: {content}")
-            return content
-            '''
-
         except Exception as e:
             logger.error(
                 f"Error getting completion from AI model {model_name}: {str(e)}", exc_info=True
@@ -1529,7 +1451,7 @@ def find_best_location(locations: List[Dict[str, Any]]) -> Optional[Dict[str, An
     return valid_locations[0]
 
 def display_analysis_results(analysis_results: List[Dict[str, Any]]):
-    """Displays the aggregated analysis sections and citations."""
+    """Displays the aggregated analysis sections and citations using tabs for each file."""
     if not analysis_results:
         logger.info("No analysis results to display.")
         return
@@ -1539,301 +1461,307 @@ def display_analysis_results(analysis_results: List[Dict[str, Any]]):
     with analysis_col:
         st.markdown("### AI Analysis Results")
 
-        # Check if any results contain actual analysis data (not just errors/info/skipped)
-        has_real_analysis = False
-        aggregated_analysis_data = {} # Store the first valid parsed analysis
-        first_result_with_data = None
+        # Filter results first
+        success_results = [
+            r for r in analysis_results
+            if isinstance(r, dict) and "error" not in r and "ai_analysis" in r
+        ]
+        error_results = [
+            r for r in analysis_results
+            if isinstance(r, dict) and "error" in r
+        ]
 
-        for r in analysis_results:
-            if isinstance(r, dict) and "ai_analysis" in r and isinstance(r['ai_analysis'], str):
-                try:
-                    parsed_ai_analysis = json.loads(r["ai_analysis"])
-                    if isinstance(parsed_ai_analysis, dict) and "analysis_sections" in parsed_ai_analysis:
-                        sections = parsed_ai_analysis["analysis_sections"]
-                        # Check if sections dict exists and contains keys NOT starting with error/info/skipped
-                        if isinstance(sections, dict) and any(not k.startswith(("error_", "info_", "skipped_")) for k in sections):
-                             has_real_analysis = True
-                             aggregated_analysis_data = parsed_ai_analysis # Store the parsed data
-                             first_result_with_data = r # Store the whole result dict for PDF access
-                             break # Found one, assume it's the main aggregated one
-                except json.JSONDecodeError:
-                    logger.warning(f"Failed to parse AI analysis JSON for result display: {r.get('filename', 'Unknown')}")
+        # Check if any successful results contain actual analysis data
+        results_with_real_analysis = []
+        for r in success_results:
+             try:
+                 parsed_ai_analysis = json.loads(r["ai_analysis"])
+                 if isinstance(parsed_ai_analysis, dict) and "analysis_sections" in parsed_ai_analysis:
+                     sections = parsed_ai_analysis["analysis_sections"]
+                     if isinstance(sections, dict) and any(not k.startswith(("error_", "info_", "skipped_")) for k in sections):
+                         results_with_real_analysis.append((r, parsed_ai_analysis)) # Store tuple of result and parsed data
+                         continue # Move to next result
+             except json.JSONDecodeError:
+                 logger.warning(f"Failed to parse AI analysis JSON for result display: {r.get('filename', 'Unknown')}")
+                 # Treat as error for display purposes if JSON is invalid
+                 error_results.append(r)
+             except Exception as e:
+                  logger.error(f"Unexpected error checking analysis data for {r.get('filename', 'Unknown')}: {e}", exc_info=True)
+                  error_results.append(r)
 
-        if not has_real_analysis:
+        if not results_with_real_analysis:
             st.info(
-                "Processing complete, but no analysis sections were successfully generated "
-                "(check errors or RAG results if files were processed)."
+                "Processing complete, but no analysis sections were successfully generated or found "
+                "in the successful results. Check logs or errors below."
             )
-            # Display specific errors from results if they exist
-            for r in analysis_results:
-                 if isinstance(r, dict) and "ai_analysis" in r and isinstance(r['ai_analysis'], str):
-                      try:
-                           parsed = json.loads(r['ai_analysis'])
-                           if isinstance(parsed, dict) and parsed.get('analysis_sections'):
-                                for key, section in parsed['analysis_sections'].items():
-                                     if key.startswith(("error_", "info_", "skipped_")) and isinstance(section, dict):
-                                          st.warning(f"**{r.get('filename', 'File')} - Info/Error:** {section.get('Analysis', 'Details unavailable.')} (Context: {section.get('Context', 'N/A')})")
-                      except: pass # Ignore parsing errors here, already warned elsewhere
-
+            # Display errors/info from original error_results
+            if error_results:
+                with st.expander("Processing Errors/Info Summary", expanded=True):
+                    for err_res in error_results:
+                         st.warning(f"**{err_res.get('filename', 'File')}**: {err_res.get('error', 'No details') or err_res.get('ai_analysis', 'No details')}")
         else:
-            # Display results from the successfully parsed aggregated data
-            result = first_result_with_data # Use the result dict containing the valid analysis
-            filename = result.get("filename", "Unknown File")
-            # ai_analysis_json_str = result.get("ai_analysis", "{}") # Already parsed above
-            verification_results = result.get("verification_results", {})
-            phrase_locations = result.get("phrase_locations", {})
-            annotated_pdf_b64 = result.get("annotated_pdf")
+            # --- Create Tabs for Each Successful Analysis --- 
+            tab_titles = [res[0].get("filename", f"Result {i+1}") for i, res in enumerate(results_with_real_analysis)]
+            tabs = st.tabs(tab_titles)
 
-            st.markdown(f"---") # Keep the divider separate
+            for i, (result, ai_analysis) in enumerate(results_with_real_analysis):
+                with tabs[i]:
+                    filename = result.get("filename", f"Result {i+1}")
+                    verification_results = result.get("verification_results", {})
+                    phrase_locations = result.get("phrase_locations", {})
+                    annotated_pdf_b64 = result.get("annotated_pdf")
 
-            # --- Filename Title and Download Button ---
-            title_col, button_col = st.columns([0.85, 0.15], gap="small", vertical_alignment="bottom")
-            with title_col:
-                st.markdown(f"##### {filename}")
+                    # --- Filename Title and Download Button --- 
+                    title_col, button_col = st.columns([0.85, 0.15], gap="small", vertical_alignment="bottom")
+                    with title_col:
+                        # Removed the markdown h5 title, tab serves as title 
+                        pass # st.markdown(f"##### {filename}")
 
-            with button_col:
-                if annotated_pdf_b64:
+                    with button_col:
+                        if annotated_pdf_b64:
+                            try:
+                                annotated_pdf_bytes = base64.b64decode(annotated_pdf_b64)
+                                download_key = f"download_{filename}_{i}" # Unique key per tab
+                                st.download_button(
+                                    label="💾 PDF",
+                                    data=annotated_pdf_bytes,
+                                    file_name=f"annotated_{filename}",
+                                    mime="application/pdf",
+                                    key=download_key,
+                                    help=f"Download annotated PDF for {filename}",
+                                    use_container_width=True,
+                                )
+                            except Exception as decode_err:
+                                logger.error(f"Failed to decode annotated PDF for download button ({filename}): {decode_err}")
+                                st.caption("DL Err")
+                        else:
+                            st.caption("No PDF")
+
                     try:
-                        annotated_pdf_bytes = base64.b64decode(annotated_pdf_b64)
-                        download_key = f"download_{filename}" # Unique key
-                        st.download_button(
-                            label="💾 PDF", # Short label
-                            data=annotated_pdf_bytes,
-                            file_name=f"annotated_{filename}",
-                            mime="application/pdf",
-                            key=download_key,
-                            help=f"Download annotated PDF for {filename}",
-                            use_container_width=True,
-                        )
-                    except Exception as decode_err:
-                        logger.error(f"Failed to decode annotated PDF for download button ({filename}): {decode_err}")
-                        st.caption("DL Err") # Short error indicator
-                else:
-                    st.caption("No PDF") # Indicate no PDF available
+                        # Use the already parsed ai_analysis dictionary 
+                        analysis_sections = ai_analysis.get("analysis_sections", {})
+                        if not analysis_sections:
+                            st.warning("No analysis sections found in the AI response for this file.")
+                            continue # Skip to next tab
 
-            try:
-                # Use the already parsed aggregated_analysis_data
-                ai_analysis = aggregated_analysis_data
+                        # Display overall analysis title if present 
+                        if ai_analysis.get("title"):
+                            st.markdown(f"##### {ai_analysis['title']}")
 
-                analysis_sections = ai_analysis.get("analysis_sections", {})
-                if not analysis_sections:
-                    st.warning("No analysis sections found in the aggregated AI response.")
-                    # Continue to PDF column
+                        citation_counter = 0
+                        for section_key, section_data in analysis_sections.items():
+                            if not isinstance(section_data, dict): continue
 
-                # Display title if present in aggregated data
-                if ai_analysis.get("title"):
-                    st.markdown(f"##### {ai_analysis['title']}")
+                            if section_key.startswith(("error_", "info_", "skipped_")):
+                                st.caption(f"Skipped/Error Section: '{section_key}' - Check logs or error summary.")
+                                continue
 
-                citation_counter = 0
-                for section_key, section_data in analysis_sections.items():
-                    if not isinstance(section_data, dict): continue
+                            display_section_name = section_key.replace("_", " ").title()
 
-                    # Skip placeholder/error sections in main display loop
-                    if section_key.startswith(("error_", "info_", "skipped_")):
-                         # Optionally display these differently or in the error expander later
-                         st.caption(f"Skipped/Error Section: '{section_key}' - Check logs or error summary for details.")
-                         continue
+                            with st.container(border=True):
+                                st.markdown(f"##### {display_section_name}")
+                                if section_data.get("Analysis"):
+                                    st.markdown(section_data["Analysis"], unsafe_allow_html=False)
+                                if section_data.get("Context"):
+                                    st.caption(f"Context: {section_data['Context']}")
 
-                    display_section_name = section_key.replace("_", " ").title()
+                                supporting_phrases = section_data.get("Supporting_Phrases", section_data.get("supporting_quotes", []))
+                                if not isinstance(supporting_phrases, list): supporting_phrases = []
 
-                    with st.container(border=True):
-                        st.markdown(f"##### {display_section_name}")
-                        if section_data.get("Analysis"):
-                            st.markdown(section_data["Analysis"], unsafe_allow_html=False)
-                        if section_data.get("Context"):
-                            st.caption(f"Context: {section_data['Context']}")
+                                if supporting_phrases:
+                                    with st.expander("Supporting Citations", expanded=False):
+                                        has_citations_to_show = False
+                                        for phrase_idx, phrase_text in enumerate(supporting_phrases):
+                                            if not isinstance(phrase_text, str) or phrase_text == "No relevant phrase found.":
+                                                continue
+                                            has_citations_to_show = True
+                                            citation_counter += 1
+                                            is_verified = verification_results.get(phrase_text, False)
+                                            locations = phrase_locations.get(phrase_text, [])
+                                            best_location = find_best_location(locations)
 
-                        supporting_phrases = section_data.get("Supporting_Phrases", section_data.get("supporting_quotes", []))
-                        if not isinstance(supporting_phrases, list): supporting_phrases = []
+                                            score_info = f"Score: {best_location['match_score']:.1f}" if best_location and "match_score" in best_location else ""
+                                            method_info = f"{best_location['method']}" if best_location and "method" in best_location else ""
+                                            page_info = f"Pg {best_location['page_num'] + 1}" if best_location and "page_num" in best_location else ""
 
-                        if supporting_phrases:
-                            with st.expander("Supporting Citations", expanded=False):
-                                has_citations_to_show = False
-                                for phrase_text in supporting_phrases:
-                                    if not isinstance(phrase_text, str) or phrase_text == "No relevant phrase found.":
-                                        continue
-                                    has_citations_to_show = True
-                                    citation_counter += 1
-                                    is_verified = verification_results.get(phrase_text, False)
-                                    locations = phrase_locations.get(phrase_text, [])
-                                    best_location = find_best_location(locations)
+                                            cite_col, btn_col = st.columns([0.90, 0.10], gap="small")
+                                            with cite_col:
+                                                if is_verified:
+                                                    badge_html = '<span style="display: inline-block; background-color: #d1fecf; color: #11631a; padding: 1px 6px; border-radius: 0.25rem; font-size: 0.8em; margin-left: 5px; border: 1px solid #a1e0a3; font-weight: 600;">✔ Verified</span>'
+                                                else:
+                                                    badge_html = '<span style="display: inline-block; background-color: #ffeacc; color: #a05e03; padding: 1px 6px; border-radius: 0.25rem; font-size: 0.8em; margin-left: 5px; border: 1px solid #f8c78d; font-weight: 600;">⚠️ Needs Review</span>'
 
-                                    status_emoji = "✅" if is_verified else "❓"
-                                    status_text = "Verified" if is_verified else "Not Verified"
-                                    score_info = f"Score: {best_location['match_score']:.1f}" if best_location and "match_score" in best_location else ""
-                                    method_info = f"{best_location['method']}" if best_location and "method" in best_location else ""
-                                    page_info = f"Pg {best_location['page_num'] + 1}" if best_location and "page_num" in best_location else ""
+                                                st.markdown(f"""
+                                                    <div style="border: 1px solid #e0e0e0; border-radius: 5px; padding: 8px 12px; margin-top: 5px; margin-bottom: 8px; background-color: #f9f9f9;">
+                                                        <div style="margin-bottom: 5px; display: flex; justify-content: space-between; align-items: center;">
+                                                            <span style="font-weight: bold;">Citation {citation_counter} {badge_html}</span>
+                                                            <span style="font-size: 0.8em; color: #555;">{page_info} {score_info} <span title='{method_info}'>({method_info})</span></span>
+                                                        </div>
+                                                        <div style="color: #333; line-height: 1.4; font-size: 0.95em;"><i>"{phrase_text}"</i></div>
+                                                    </div>""", unsafe_allow_html=True)
+                                            with btn_col:
+                                                if is_verified and best_location and "page_num" in best_location and annotated_pdf_b64:
+                                                    page_num_1_indexed = best_location["page_num"] + 1
+                                                    button_key = f"goto_{filename}_{section_key}_{citation_counter}_{i}_{phrase_idx}" # More unique key
+                                                    st.markdown('<div style="margin-top: 20px;"></div>', unsafe_allow_html=True)
+                                                    if st.button("Go", key=button_key, type="secondary", help=f"Go to Page {page_num_1_indexed} in {filename}"):
+                                                        try:
+                                                            pdf_bytes = base64.b64decode(annotated_pdf_b64)
+                                                            update_pdf_view(pdf_bytes=pdf_bytes, page_num=page_num_1_indexed, filename=filename)
+                                                            # No rerun needed here, update_pdf_view handles it if necessary
+                                                        except Exception as decode_err:
+                                                            logger.error(f"Failed to decode/set PDF for citation button: {decode_err}", exc_info=True)
+                                                            st.warning("Could not load PDF for this citation.")
+                                                elif is_verified:
+                                                    st.markdown('<div style="margin-top: 20px; text-align: center;">', unsafe_allow_html=True)
+                                                    st.caption("Loc N/A")
+                                                    st.markdown("</div>", unsafe_allow_html=True)
+                                        if not has_citations_to_show:
+                                            st.caption("No supporting citations provided or found for this section.")
 
-                                    cite_col, btn_col = st.columns([0.90, 0.10], gap="small")
-                                    with cite_col:
-                                        st.markdown(f"""
-                                            <div style="border: 1px solid #e0e0e0; border-radius: 5px; padding: 8px 12px; margin-bottom: 8px; background-color: #f9f9f9;">
-                                                <div style="margin-bottom: 5px; display: flex; justify-content: space-between; align-items: center;">
-                                                    <span style="font-weight: bold;">Citation {citation_counter} {status_emoji}</span>
-                                                    <span style="font-size: 0.8em; color: #555;">{page_info} {score_info} <span title='{method_info}'>({status_text})</span></span>
-                                                </div>
-                                                <div style="color: #333; line-height: 1.4; font-size: 0.95em;"><i>"{phrase_text}"</i></div>
-                                            </div>""", unsafe_allow_html=True)
-                                    with btn_col:
-                                        if is_verified and best_location and "page_num" in best_location and annotated_pdf_b64:
-                                            page_num_1_indexed = best_location["page_num"] + 1
-                                            button_key = f"goto_{filename}_{section_key}_{citation_counter}" # Unique key
-                                            st.markdown('<div style="margin-top: 20px;"></div>', unsafe_allow_html=True)
-                                            if st.button("Go", key=button_key, type="secondary", help=f"Go to Page {page_num_1_indexed} in {filename}"):
-                                                try:
-                                                    pdf_bytes = base64.b64decode(annotated_pdf_b64)
-                                                    update_pdf_view(pdf_bytes=pdf_bytes, page_num=page_num_1_indexed, filename=filename)
-                                                    # st.rerun() # <-- REMOVE THIS LINE
-                                                except Exception as decode_err:
-                                                    logger.error(f"Failed to decode/set PDF for citation button: {decode_err}", exc_info=True)
-                                                    st.warning("Could not load PDF for this citation.")
-                                        elif is_verified:
-                                            st.markdown('<div style="margin-top: 20px; text-align: center;">', unsafe_allow_html=True)
-                                            st.caption("Loc N/A")
-                                            st.markdown("</div>", unsafe_allow_html=True)
-                                if not has_citations_to_show:
-                                    st.caption("No supporting citations provided or found for this section.")
+                    except Exception as display_err:
+                        logger.error(f"Error displaying analysis tab for {filename}: {display_err}", exc_info=True)
+                        st.error(f"Error displaying analysis results for {filename}: {display_err}")
 
-            except Exception as display_err:
-                logger.error(f"Error displaying analysis for {filename}: {display_err}", exc_info=True)
-                st.error(f"Error displaying analysis results for {filename}: {display_err}")
-
-    # --- PDF Viewer and Tools Column ---
+    # --- PDF Viewer and Tools Column --- 
     with pdf_col:
         st.markdown("### Analysis Tools & PDF Viewer")
 
-        # --- Wrap Tool Expanders in a Container ---
+        # --- Wrap Tool Expanders in a Container --- 
         with st.container():
-            # --- Chat Interface Expander ---
-            # Modified expander, remove placeholder, add chat logic
-            # Set expanded=False by default to potentially avoid nesting issues
+            # --- Chat Interface Expander --- 
             with st.expander("💬 SmartChat", expanded=False):
-                # Check if documents are loaded and preprocessed for chat
                 if not st.session_state.get("preprocessed_data"):
                     st.info("Upload and process documents to enable chat.")
                 else:
-                    # Chat Message Display Area
                     chat_container = st.container(height=400, border=True)
                     with chat_container:
-                        for message in st.session_state.chat_messages:
+                        # Use enumerate to get the index of each message in the session state list
+                        for msg_idx, message in enumerate(st.session_state.chat_messages):
                             with st.chat_message(message["role"]):
                                 if message["role"] == "assistant":
-                                    # --- Pass processed text and details to display function ---
-                                    processed_text = message.get("processed_text", message["content"]) # Fallback to raw content
+                                    processed_text = message.get("processed_text", message["content"])
                                     citation_details = message.get("citation_details", [])
-                                    display_chat_message_with_citations(processed_text, citation_details)
+                                    # Pass the message index (msg_idx) to the display function
+                                    display_chat_message_with_citations(processed_text, citation_details, msg_idx)
                                 else:
-                                    st.markdown(message["content"]) # Display simple user messages
+                                    st.markdown(message["content"])
 
-                    # Chat Input - Placed outside the container
                     if prompt := st.chat_input("Ask about the uploaded documents...", key="chat_input_main"):
-                        # --- Simplified Chat Processing --- 
-                        # 1. Add user message to state
                         st.session_state.chat_messages.append({"role": "user", "content": prompt})
-                        
-                        # 2. Process and get response (no intermediate reruns)
-                        # --- Store processed text and citation details --- 
-                        processed_chat_text = "Error: Could not generate response." # Default error text
+                        processed_chat_text = "Error: Could not generate response."
                         chat_citation_details = []
                         raw_ai_response_content = ""
-
                         try:
-                            with st.spinner("Thinking..."): # Use spinner for feedback
-                                # a. Perform RAG across all documents
+                            with st.spinner("Thinking..."):
                                 logger.info(f"Chat RAG started for: {prompt[:50]}...")
-                                CHAT_RAG_TOP_K_PER_DOC = 3 # How many chunks per doc? (Configurable)
+                                CHAT_RAG_TOP_K_PER_DOC = 5 # Increased from 3 to 5, to get more context
                                 relevant_chunks = retrieve_relevant_chunks_for_chat(prompt, top_k_per_doc=CHAT_RAG_TOP_K_PER_DOC)
-                
-                                # b. Generate AI Response
-                                analyzer = DocumentAnalyzer() # Instantiate analyzer here
+                                analyzer = DocumentAnalyzer()
                                 logger.info(f"Generating chat response for: {prompt[:50]}...")
                                 raw_ai_response_content = run_async(analyzer.generate_chat_response(prompt, relevant_chunks))
                                 logger.info("Chat response generated.")
-
-                                # c. Process raw response for numbered citations
                                 processed_chat_text, chat_citation_details = process_chat_response_for_numbered_citations(raw_ai_response_content)
-    
                         except Exception as chat_err:
                             logger.error(f"Error during chat processing: {chat_err}", exc_info=True)
-                            # Use the error message as the processed text, no citations
                             processed_chat_text = f"Sorry, an error occurred while processing your request: {str(chat_err)}"
-                            chat_citation_details = [] # Ensure empty list on error
-                        
-                        # 3. Add final assistant response to state (with new structure)
+                            chat_citation_details = []
                         st.session_state.chat_messages.append({
-                            "role": "assistant", 
-                            "content": raw_ai_response_content, # Keep raw response if needed
-                            "processed_text": processed_chat_text, # Text with [1], [2]
-                            "citation_details": chat_citation_details # List for footer buttons
+                            "role": "assistant",
+                            "content": raw_ai_response_content,
+                            "processed_text": processed_chat_text,
+                            "citation_details": chat_citation_details
                         })
-                        
-                        # 4. Rerun ONLY ONCE to update the display
                         st.rerun()
 
-            # --- Export Expander ---
+            # --- Export Expander --- 
             with st.expander("📊 Export Results", expanded=False):
-                # We already filtered for display, use the same logic/data
-                if has_real_analysis and first_result_with_data:
-                    exportable_result = first_result_with_data # Use the single aggregated result
+                # Use results_with_real_analysis which contains successful results with content
+                if results_with_real_analysis:
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     try:
                         flat_data = []
-                        fname = exportable_result.get("filename", "N/A")
-                        ai_data = aggregated_analysis_data # Use the parsed data
-                        title = ai_data.get("title", "")
-                        verif_res = exportable_result.get("verification_results", {})
-                        phrase_locs = exportable_result.get("phrase_locations", {})
+                        exportable_results_list = [res[0] for res in results_with_real_analysis] # Extract original result dicts
+                        parsed_analysis_list = [res[1] for res in results_with_real_analysis] # Extract parsed analysis dicts
 
-                        for sec_name, sec_data in ai_data.get("analysis_sections", {}).items():
-                            if not isinstance(sec_data, dict) or sec_name.startswith(("error_", "info_", "skipped_")):
-                                continue # Skip non-dict or placeholder sections for export
-                            analysis = sec_data.get("Analysis", "")
-                            context = sec_data.get("Context", "")
-                            phrases = sec_data.get("Supporting_Phrases", sec_data.get("supporting_quotes", []))
-                            if not isinstance(phrases, list): phrases = []
+                        for idx, exportable_result in enumerate(exportable_results_list):
+                            fname = exportable_result.get("filename", "N/A")
+                            ai_data = parsed_analysis_list[idx] # Get corresponding parsed data
+                            title = ai_data.get("title", "")
+                            verif_res = exportable_result.get("verification_results", {})
+                            phrase_locs = exportable_result.get("phrase_locations", {})
 
-                            if not phrases or phrases == ["No relevant phrase found."]:
-                                flat_data.append({"Filename": fname, "AI Title": title, "Section": sec_name, "Analysis": analysis, "Context": context, "Supporting Phrase": "N/A", "Verified": "N/A", "Page": "N/A", "Match Score": "N/A", "Method": "N/A"})
-                            else:
-                                for phrase in phrases:
-                                    if not isinstance(phrase, str): continue
-                                    verified = verif_res.get(phrase, False)
-                                    locs = phrase_locs.get(phrase, [])
-                                    best_loc = find_best_location(locs)
-                                    page = best_loc["page_num"] + 1 if best_loc and "page_num" in best_loc else "N/A"
-                                    score = f"{best_loc['match_score']:.1f}" if best_loc and "match_score" in best_loc else "N/A"
-                                    method = best_loc["method"] if best_loc and "method" in best_loc else "N/A"
-                                    flat_data.append({"Filename": fname, "AI Title": title, "Section": sec_name, "Analysis": analysis, "Context": context, "Supporting Phrase": phrase, "Verified": verified, "Page": page, "Match Score": score, "Method": method})
+                            for sec_name, sec_data in ai_data.get("analysis_sections", {}).items():
+                                if not isinstance(sec_data, dict) or sec_name.startswith(("error_", "info_", "skipped_")):
+                                    continue
+                                analysis = sec_data.get("Analysis", "")
+                                context = sec_data.get("Context", "")
+                                phrases = sec_data.get("Supporting_Phrases", sec_data.get("supporting_quotes", []))
+                                if not isinstance(phrases, list): phrases = []
+
+                                if not phrases or phrases == ["No relevant phrase found."]:
+                                    flat_data.append({"Filename": fname, "AI Title": title, "Section": sec_name, "Analysis": analysis, "Context": context, "Supporting Phrase": "N/A", "Verified": "N/A", "Page": "N/A", "Match Score": "N/A", "Method": "N/A"})
+                                else:
+                                    for phrase in phrases:
+                                        if not isinstance(phrase, str): continue
+                                        verified = verif_res.get(phrase, False)
+                                        locs = phrase_locs.get(phrase, [])
+                                        best_loc = find_best_location(locs)
+                                        page = best_loc["page_num"] + 1 if best_loc and "page_num" in best_loc else "N/A"
+                                        score = f"{best_loc['match_score']:.1f}" if best_loc and "match_score" in best_loc else "N/A"
+                                        method = best_loc["method"] if best_loc and "method" in best_loc else "N/A"
+                                        flat_data.append({"Filename": fname, "AI Title": title, "Section": sec_name, "Analysis": analysis, "Context": context, "Supporting Phrase": phrase, "Verified": verified, "Page": page, "Match Score": score, "Method": method})
 
                         if not flat_data:
                             st.info("No data available to export after filtering analysis sections.")
                         else:
                             col1, col2 = st.columns(2)
                             df = pd.DataFrame(flat_data)
+
+                            # Export to Excel 
                             excel_buffer = BytesIO()
                             try:
                                 df.to_excel(excel_buffer, index=False, engine="openpyxl")
                                 excel_buffer.seek(0)
-                                with col1: st.download_button("📥 Export Excel", excel_buffer, f"analysis_{fname}_{timestamp}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="export_excel_main")
+                                with col1: st.download_button(
+                                    "📥 Export Excel",
+                                    excel_buffer,
+                                    f"analysis_report_{timestamp}.xlsx", # Generic name for multi-file export
+                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    key="export_excel_main"
+                                )
                             except ImportError:
                                  logger.error("Export to Excel failed: 'openpyxl' not found.")
                                  with col1: st.warning("Excel export requires 'openpyxl'. Install it (`pip install openpyxl`)")
+                            except Exception as excel_export_err:
+                                logger.error(f"Excel export failed: {excel_export_err}", exc_info=True)
+                                with col1: st.error(f"Excel export error: {excel_export_err}")
 
-                            # Export Aggregated Raw JSON
-                            json_buffer = BytesIO()
-                            # Use the already parsed and validated aggregated_analysis_data
-                            export_json_str = json.dumps(aggregated_analysis_data, indent=2)
-                            json_buffer.write(export_json_str.encode("utf-8"))
-                            json_buffer.seek(0)
-                            with col2: st.download_button("📄 Export JSON", json_buffer, f"analysis_aggregated_{fname}_{timestamp}.json", "application/json", key="export_json_main")
+                            # Export to Word 
+                            try:
+                                # Pass the list of successful, analyzed results
+                                word_bytes = export_to_word(exportable_results_list)
+                                with col2: st.download_button(
+                                    "📥 Export Word",
+                                    word_bytes,
+                                    f"analysis_report_{timestamp}.docx", # Generic name
+                                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                    key="export_word_main"
+                                )
+                            except ImportError:
+                                 logger.error("Export to Word failed: 'python-docx' not found.")
+                                 with col2: st.warning("Word export requires 'python-docx'. Install it (`pip install python-docx`)")
+                            except Exception as word_export_err:
+                                logger.error(f"Word export failed: {word_export_err}", exc_info=True)
+                                with col2: st.error(f"Word export error: {word_export_err}")
 
-                    except Exception as export_err:
-                        logger.error(f"Export failed: {export_err}", exc_info=True)
-                        st.error(f"Export failed: {export_err}")
+                    except Exception as export_setup_err:
+                        logger.error(f"Export data preparation failed: {export_setup_err}", exc_info=True)
+                        st.error(f"Failed to prepare data for export: {export_setup_err}")
                 else:
                     st.info("No analysis results available to export.")
 
-            # --- Report Issue Expander ---
+            # --- Report Issue Expander --- 
             with st.expander("⚠️ Report Issue", expanded=False):
                 st.markdown("Encountered an issue? Please describe it below.")
                 issue_text = st.text_area("Issue Description", key="issue_desc")
@@ -1844,7 +1772,7 @@ def display_analysis_results(analysis_results: List[Dict[str, Any]]):
                     else:
                         st.warning("Please describe the issue before submitting.")
 
-        # --- PDF Viewer Display (Remains outside the container, at the END) ---
+        # --- PDF Viewer Display (Remains outside the container, at the END) --- 
         display_pdf_viewer()
 
 
@@ -1880,39 +1808,43 @@ def process_chat_response_for_numbered_citations(raw_response_text: str) -> Tupl
     """
     citation_pattern = re.compile(r"\(Source:\s*(?P<filename>[^,]+?)\s*,\s*Page:\s*(?P<page>\d+)\)")
     
-    citations_found = []
-    unique_sources = {} # Store unique (filename, page_num) -> number
-    citation_details_for_footer = []
+    citations_found_for_replacement = [] # Stores info needed for text replacement
+    citation_details_for_footer = [] # Stores unique details for footer buttons
     next_citation_number = 1
     processed_text = raw_response_text
 
-    # First pass: Find all citations and assign numbers to unique sources
+    # Find all citations and assign sequential numbers
     for match in citation_pattern.finditer(raw_response_text):
         filename = match.group("filename").strip()
         page_str = match.group("page").strip()
         try:
             page_num = int(page_str)
-            source_tuple = (filename, page_num)
 
-            if source_tuple not in unique_sources:
-                unique_sources[source_tuple] = next_citation_number
-                # Get PDF bytes now to ensure availability later
-                pdf_bytes = find_annotated_pdf_for_filename(filename)
-                citation_details_for_footer.append({
-                    'number': next_citation_number,
-                    'filename': filename,
-                    'page': page_num,
-                    'pdf_bytes': pdf_bytes # Can be None if not found
-                })
-                next_citation_number += 1
-            
-            # Store details of this specific occurrence for replacement pass
-            citations_found.append({
+            # --- Assign unique number to THIS instance ---
+            current_number = next_citation_number
+
+            # Get PDF bytes for this source
+            pdf_bytes = find_annotated_pdf_for_filename(filename)
+
+            # Store details for the footer button list
+            citation_details_for_footer.append({
+                'number': current_number,
+                'filename': filename,
+                'page': page_num,
+                'pdf_bytes': pdf_bytes # Can be None if not found
+            })
+
+            # Store details needed to replace the text later
+            citations_found_for_replacement.append({
                 'start': match.start(),
                 'end': match.end(),
-                'number': unique_sources[source_tuple],
-                'original_text': match.group(0) # Keep original text for replacement
+                'number': current_number,
+                'original_text': match.group(0)
             })
+
+            # Increment for the *next* citation found
+            next_citation_number += 1
+
         except ValueError:
             logger.warning(f"Found invalid page number in citation: {match.group(0)}")
         except Exception as e:
@@ -1920,22 +1852,22 @@ def process_chat_response_for_numbered_citations(raw_response_text: str) -> Tupl
 
     # Second pass: Replace citations in the text from end to start (to avoid index issues)
     # Sort by start position in reverse order
-    citations_found.sort(key=lambda x: x['start'], reverse=True)
-    
-    for citation in citations_found:
+    citations_found_for_replacement.sort(key=lambda x: x['start'], reverse=True)
+
+    for citation in citations_found_for_replacement:
         processed_text = (
-            processed_text[:citation['start']] + 
-            f" [{citation['number']}]" + 
+            processed_text[:citation['start']] +
+            f" [{citation['number']}]" +
             processed_text[citation['end']:]
         )
-        
-    # Sort the footer details by number for display
-    citation_details_for_footer.sort(key=lambda x: x['number'])
+
+    # Footer details are already collected sequentially, no extra sort needed by number
+    # citation_details_for_footer.sort(key=lambda x: x['number']) # This is no longer needed
 
     return processed_text.strip(), citation_details_for_footer
 
 
-def display_chat_message_with_citations(processed_text: str, citation_details: List[Dict[str, Any]]):
+def display_chat_message_with_citations(processed_text: str, citation_details: List[Dict[str, Any]], msg_idx: int):
     """
     Displays the processed chat message containing numbered citations [1], [2], etc.,
     and lists the corresponding source buttons below.
@@ -1944,8 +1876,9 @@ def display_chat_message_with_citations(processed_text: str, citation_details: L
         processed_text: The message text with (Source:...) replaced by [1], [2].
         citation_details: A list of dictionaries from process_chat_response_for_numbered_citations,
                           each containing 'number', 'filename', 'page', 'pdf_bytes'.
+        msg_idx: The index of the message in the overall chat history (for unique keys).
     """
-    
+
     # Display the main message content with inline numbers
     st.markdown(processed_text, unsafe_allow_html=True)
 
@@ -1957,7 +1890,7 @@ def display_chat_message_with_citations(processed_text: str, citation_details: L
         num_columns = min(len(citation_details), 3) # Max 3 columns
         cols = st.columns(num_columns)
         col_idx = 0
-        
+
         for i, citation in enumerate(citation_details):
             number = citation['number']
             filename = citation['filename']
@@ -1966,19 +1899,20 @@ def display_chat_message_with_citations(processed_text: str, citation_details: L
 
             with cols[col_idx]:
                 if pdf_bytes:
-                    button_key = f"chat_footer_cite_{filename}_{page_num}_{number}_{i}" # Unique key
+                    # Include the message index (msg_idx) and citation index (i) for guaranteed uniqueness
+                    button_key = f"chat_footer_cite_{filename}_{page_num}_{number}_{msg_idx}_{i}" # Updated unique key
                     # Render the button with the citation number
-                    st.button(f"[{number}] 📄 {filename}, p{page_num}", 
-                              key=button_key, 
-                              help=f"View Page {page_num} in {filename}", 
-                              type="secondary", 
-                              on_click=update_pdf_view, 
+                    st.button(f"[{number}] 📄 {filename}, p{page_num}",
+                              key=button_key,
+                              help=f"View Page {page_num} in {filename}",
+                              type="secondary",
+                              on_click=update_pdf_view,
                               args=(pdf_bytes, page_num, filename)
                               )
                 else:
                     # If PDF not found, display text indicating the source
                     st.markdown(f"[{number}] {filename}, p{page_num} (PDF not found)")
-            
+
             col_idx = (col_idx + 1) % num_columns # Cycle through columns
 
 
@@ -2034,7 +1968,7 @@ def aggregate_analysis_results(
             final_analysis["analysis_sections"][section_key] = {
                 "Analysis": analysis_summary,
                 "Supporting_Phrases": supporting_quotes,
-                "Context": f"AI Title: '{task_title}' | Sub-prompt: '{sub_prompt}'" + (f" | LLM Context: {analysis_context}" if analysis_context else "")
+                "Context": f"{analysis_context}"
             }
 
             # Set a better overall title if we haven't yet and this is the first valid analysis
@@ -2067,6 +2001,225 @@ def aggregate_analysis_results(
 
     return json.dumps(final_analysis, indent=2)
 
+# --- NEW: Word Export Function ---
+def export_to_word(analysis_results):
+    """Export analysis results to Word document"""
+    try:
+        # Create a new Word document
+        doc = Document()
+
+        # Set document properties
+        doc.core_properties.title = "Document Analysis Report"
+        doc.core_properties.author = "AI Document Analyzer"
+        doc.core_properties.created = datetime.now()
+
+        # Add title
+        title = doc.add_heading('Document Analysis Report', 0)
+        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        # Add date
+        date_paragraph = doc.add_paragraph()
+        date_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        date_run = date_paragraph.add_run(f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        date_run.font.size = Pt(10)
+        date_run.font.italic = True
+
+        doc.add_paragraph()  # Add some space
+
+        # Process each result
+        for result in analysis_results:
+            filename = result.get('filename', 'Unknown File') # Use .get for safety
+
+            # Add document header
+            doc.add_heading(f"Document: {filename}", 1)
+
+            try:
+                # Parse the analysis data with error handling
+                ai_analysis_value = result.get('ai_analysis') # Use .get
+                if isinstance(ai_analysis_value, str):
+                    try:
+                        analysis_data = json.loads(ai_analysis_value)
+                    except json.JSONDecodeError as e:
+                        logger.error(f"JSON parsing error in export_to_word for {filename}: {str(e)}")
+                        raise ValueError(f"Could not parse analysis JSON for {filename}. Content: {ai_analysis_value[:200]}...")
+                elif isinstance(ai_analysis_value, dict):
+                    analysis_data = ai_analysis_value # Already a dict
+                else:
+                    raise ValueError(f"Unexpected type for ai_analysis in {filename}: {type(ai_analysis_value)}")
+
+                analysis_sections = analysis_data.get('analysis_sections', {}) # Use .get
+
+                # Check if this is an error response (handle potential errors from aggregation)
+                is_error_only = True
+                for section_name in analysis_sections:
+                    if not section_name.startswith(("error_", "info_", "skipped_")):
+                        is_error_only = False
+                        break
+
+                if not analysis_sections or is_error_only:
+                    doc.add_heading("Analysis Status", 2)
+                    p = doc.add_paragraph()
+                    status_run = p.add_run("No analysis sections found or only errors/info were present.")
+                    status_run.font.color.rgb = RGBColor(128, 128, 128) # Gray color
+                    # Optionally list the specific errors/info keys found
+                    if analysis_sections:
+                        for error_key, error_data in analysis_sections.items():
+                             if isinstance(error_data, dict):
+                                  p_err = doc.add_paragraph()
+                                  p_err.add_run(f"- {error_key}: ").bold = True
+                                  p_err.add_run(error_data.get('Analysis', 'Details unavailable.'))
+                                  if error_data.get('Context'):
+                                       p_err.add_run(f" (Context: {error_data.get('Context')})")
+                    doc.add_paragraph()  # Add space
+                    if len(analysis_results) > 1 : doc.add_page_break() # Add page break only if more than one doc
+                    continue # Skip to the next document result
+
+                # Process each valid section in the analysis
+                for section_name, section in analysis_sections.items():
+                    # Skip error/info sections in the main processing loop
+                    if section_name.startswith(("error_", "info_", "skipped_")):
+                        continue
+                    if not isinstance(section, dict): # Skip non-dict sections
+                        logger.warning(f"Skipping non-dictionary section '{section_name}' during Word export for {filename}.")
+                        continue
+
+                    # Add section header
+                    doc.add_heading(section_name.replace('_', ' ').title(), 2)
+
+                    # Add analysis text
+                    if section.get('Analysis'):
+                        p = doc.add_paragraph()
+                        p.add_run("Analysis: ").bold = True
+                        p.add_run(section.get('Analysis'))
+
+                    # Add context if available
+                    if section.get('Context'):
+                        p = doc.add_paragraph()
+                        p.add_run("Context: ").bold = True
+                        p.add_run(section.get('Context'))
+
+                    # Add supporting phrases
+                    # Use the correct key "Supporting_Phrases" from aggregation
+                    supporting_phrases = section.get('Supporting_Phrases', [])
+                    if supporting_phrases:
+                        doc.add_heading("Supporting Citations", 3)
+
+                        if not isinstance(supporting_phrases, list):
+                             p = doc.add_paragraph()
+                             p.style = 'List Bullet'
+                             p.add_run(f"Warning: Expected a list for Supporting_Phrases, got {type(supporting_phrases)}.")
+                             continue
+
+                        for phrase in supporting_phrases:
+                            if not isinstance(phrase, str):
+                                p = doc.add_paragraph()
+                                p.style = 'List Bullet'
+                                p.add_run(f"Warning: Found non-string item in Supporting_Phrases: {type(phrase)}.")
+                                continue
+
+                            if phrase == "No relevant phrase found.":
+                                p = doc.add_paragraph()
+                                p.style = 'List Bullet'
+                                p.add_run("No relevant phrase found")
+                            else:
+                                # Phrase text is already clean
+                                clean_phrase = phrase
+
+                                # Check verification status using the clean phrase
+                                is_verified = result.get("verification_results", {}).get(clean_phrase, False)
+
+                                # Get page number and other details from phrase_locations
+                                page_num_info = "N/A"
+                                score_info = "N/A"
+                                method_info = "N/A"
+                                locations = result.get("phrase_locations", {}).get(clean_phrase, [])
+                                best_location = find_best_location(locations) # Use the helper function
+                                if best_location:
+                                    if "page_num" in best_location: page_num_info = str(best_location["page_num"] + 1) # 1-indexed
+                                    if "match_score" in best_location: score_info = f"{best_location['match_score']:.1f}"
+                                    if "method" in best_location: method_info = best_location["method"]
+
+                                p = doc.add_paragraph()
+                                p.style = 'List Bullet'
+
+                                # Add verification icon
+                                if is_verified:
+                                    p.add_run("✓ ").bold = True
+                                else:
+                                    # Use a different symbol if not verified but location exists vs completely not found
+                                    symbol = "❓ " if locations else "❌ "
+                                    p.add_run(symbol).bold = True
+
+                                # Add the phrase
+                                p.add_run(clean_phrase)
+
+                                # Add details (page, score, method)
+                                details_run = p.add_run(f" (Pg: {page_num_info}, Score: {score_info}, Method: {method_info})")
+                                details_run.italic = True
+                                details_run.font.size = Pt(9)
+                                details_run.font.color.rgb = RGBColor(100, 100, 100) # Gray color
+
+                    doc.add_paragraph()  # Add space between sections
+
+                # Add page break between documents *only if there are multiple* documents being exported
+                if len(analysis_results) > 1 : doc.add_page_break()
+
+            except ValueError as ve:
+                logger.error(f"Data error processing result for {filename} in export_to_word: {str(ve)}")
+                doc.add_heading(f"Error Processing {filename}", 2)
+                p = doc.add_paragraph()
+                error_run = p.add_run(f"Error processing analysis data: {str(ve)}")
+                error_run.font.color.rgb = RGBColor(255, 0, 0)
+                p = doc.add_paragraph()
+                p.add_run("The system encountered a data error while trying to export this document's analysis.")
+                if len(analysis_results) > 1 : doc.add_page_break()
+
+            except Exception as e:
+                logger.error(f"Unexpected error processing result for {filename} in export_to_word: {str(e)}", exc_info=True)
+                doc.add_heading(f"Unexpected Error Processing {filename}", 2)
+                p = doc.add_paragraph()
+                error_run = p.add_run(f"Unexpected error processing analysis: {str(e)}")
+                error_run.font.color.rgb = RGBColor(255, 0, 0)
+                p = doc.add_paragraph()
+                p.add_run("The system encountered an unexpected error while trying to export this document's analysis.")
+                if len(analysis_results) > 1 : doc.add_page_break()
+
+        # Save the document to a BytesIO object
+        output = BytesIO()
+        doc.save(output)
+        output.seek(0)
+
+        return output.getvalue()
+
+    except ImportError:
+        logger.error("Export to Word failed: 'python-docx' is not installed.")
+        # Create a simple error document indicating the missing dependency
+        doc = Document()
+        doc.add_heading('Export Error', 0)
+        p = doc.add_paragraph()
+        error_run = p.add_run("Failed to export analysis results because the 'python-docx' library is not installed.")
+        error_run.font.color.rgb = RGBColor(255, 0, 0)
+        p.add_run("\nPlease install it using: pip install python-docx")
+        output = BytesIO()
+        doc.save(output)
+        output.seek(0)
+        return output.getvalue()
+
+    except Exception as e:
+        logger.error(f"Error exporting to Word (Outer Try/Except): {str(e)}", exc_info=True)
+
+        # Create a simple generic error document
+        doc = Document()
+        doc.add_heading('Export Error', 0)
+        p = doc.add_paragraph()
+        error_run = p.add_run(f"Failed to export analysis results due to an unexpected error: {str(e)}")
+        error_run.font.color.rgb = RGBColor(255, 0, 0)
+
+        output = BytesIO()
+        doc.save(output)
+        output.seek(0)
+
+        return output.getvalue()
 
 def process_file_wrapper(args):
     """
@@ -2078,6 +2231,8 @@ def process_file_wrapper(args):
         filename,
         user_prompt,
         use_advanced_extraction, # Keep if PDFProcessor uses it
+        # --- NEW: Pass preprocessed data if available --- 
+        preprocessed_data_for_file
     ) = args
 
     if embedding_model is None:
@@ -2089,7 +2244,8 @@ def process_file_wrapper(args):
 
     try:
         # Check for preprocessed data
-        preprocessed_data = st.session_state.get("preprocessed_data", {}).get(filename)
+        # Use the data passed via args instead of session_state
+        preprocessed_data = preprocessed_data_for_file
         
         if preprocessed_data:
             # Use precomputed data
@@ -2183,15 +2339,15 @@ def process_file_wrapper(args):
              logger.info(f"Sub-task {i+1}/{len(decomposed_tasks)} completed in {sub_elapsed:.2f}s")
              
              # If we have a status_container from the main thread, update it with completion
-             if 'status_container' in globals():
-                 status_container.info(f"Completed sub-task {i+1}/{len(decomposed_tasks)} for {filename}: {task_title} in {sub_elapsed:.2f}s")
+             # REMOVED: if 'status_container' in globals():
+             # REMOVED:    status_container.info(f"Completed sub-task {i+1}/{len(decomposed_tasks)} for {filename}: {task_title} in {sub_elapsed:.2f}s")
 
 
         # --- Step 4: Aggregate Results ---
         logger.info(f"Aggregating {len(individual_analysis_results)} analysis results for {filename}.")
         # If we have a status_container from the main thread, update it
-        if 'status_container' in globals():
-            status_container.info(f"Aggregating results from {len(individual_analysis_results)} sub-tasks for {filename}...")
+        # REMOVED: if 'status_container' in globals():
+        # REMOVED:     status_container.info(f"Aggregating results from {len(individual_analysis_results)} sub-tasks for {filename}...")
             
         aggregated_ai_analysis_json_str = aggregate_analysis_results(
             individual_analysis_results, filename, user_prompt # Pass the modified list
@@ -2199,8 +2355,8 @@ def process_file_wrapper(args):
 
         # --- Step 5: Verification & Annotation (on aggregated results) ---
         # If we have a status_container from the main thread, update it
-        if 'status_container' in globals():
-            status_container.info(f"Verifying phrases and annotating PDF for {filename}...")
+        # REMOVED: if 'status_container' in globals():
+        # REMOVED:     status_container.info(f"Verifying phrases and annotating PDF for {filename}...")
             
         # Create a processor if none exists (if preprocessed data was used)
         if preprocessed_data and 'processor' not in locals():
@@ -2223,9 +2379,6 @@ def process_file_wrapper(args):
         total_duration = (end_time - start_time).total_seconds()
         logger.info(f"Successfully processed {filename} in {total_duration:.2f} seconds.")
         
-        # If we have a status_container from the main thread, update it with final completion
-        if 'status_container' in globals():
-            status_container.success(f"Successfully processed {filename} in {total_duration:.2f} seconds.")
 
         return {
             "filename": filename,
@@ -2238,9 +2391,6 @@ def process_file_wrapper(args):
 
     except Exception as e:
         logger.error(f"Error in process_file_wrapper for {filename}: {str(e)}", exc_info=True)
-        # If we have a status_container from the main thread, update it with error
-        if 'status_container' in globals():
-            status_container.error(f"Error processing {filename}: {str(e)}")
             
         # Try to get original bytes if available for error display
         err_pdf_bytes = None
@@ -2280,343 +2430,313 @@ def display_page():
     if "file_selection_changed_by_user" not in st.session_state: st.session_state.file_selection_changed_by_user = False
     # --- NEW: Store files temporarily during change handling ---
     if "current_file_objects_from_change" not in st.session_state: st.session_state.current_file_objects_from_change = None 
+    # --- NEW: Flag for auto-scroll ---
+    if "results_just_generated" not in st.session_state: st.session_state.results_just_generated = False
 
-
-    # --- UI Layout ---
-    st.markdown(
-        "<h1 style='text-align: center;'>SmartDocs (RAG + Decomposition Enabled)</h1>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        "<p style='text-align: center; font-style: italic;'>Complex prompts are now decomposed into sub-questions for more focused analysis.</p>",
-        unsafe_allow_html=True,
-    )
-
-
-    # Check if embedding model loaded successfully
-    if embedding_model is None:
-        st.error(
-            "Embedding model failed to load. Document processing is disabled. "
-            "Please check logs and ensure dependencies ('sentence-transformers', 'torch', etc.) are installed correctly."
-        )
-        return # Stop further UI rendering
-
-    # --- NEW: Callback for file uploader ---
-    def handle_file_change():
-        # This callback runs *before* the script reruns due to the change.
-        # Get the current state of the uploader directly
-        current_files = st.session_state.get("file_uploader_decompose", []) # Access via key
-        st.session_state.current_file_objects_from_change = current_files
-        # Set the flag to trigger processing on the next run.
-        st.session_state.file_selection_changed_by_user = True
-        logger.debug(f"handle_file_change: Stored {len(current_files) if current_files else 0} files. Flag set.")
-
-    # --- File Upload ---
-    uploaded_files = st.file_uploader(
-        "Upload PDF or Word files",
-        type=["pdf", "docx"],
-        accept_multiple_files=True,
-        key="file_uploader_decompose", # Unique key
-        on_change=handle_file_change, # Assign the callback
-    )
-
-    # --- Logic to handle file changes, triggered ONLY by the callback flag ---
-    if st.session_state.file_selection_changed_by_user:
-        logger.debug("Processing detected file change from user action.")
-        # Reset the flag immediately
-        st.session_state.file_selection_changed_by_user = False
-
-        # Use the file list stored by the callback
-        current_files = st.session_state.current_file_objects_from_change
-        current_uploaded_filenames = set(f.name for f in current_files) if current_files else set()
-        
-        # Compare with last known state (before the change)
-        last_filenames = st.session_state.get('last_uploaded_filenames', set())
-        
-        # --- Perform the update logic ONLY IF filenames actually changed --- 
-        if current_uploaded_filenames != last_filenames:
-            logger.info(f"Actual file change confirmed: New={current_uploaded_filenames - last_filenames}, Removed={last_filenames - current_uploaded_filenames}")
-            # Process files that were newly added
-            new_files = current_uploaded_filenames - last_filenames
-            removed_files = last_filenames - current_uploaded_filenames
-            
-            # Update state with the new list of file objects
-            st.session_state.uploaded_file_objects = current_files
-            st.session_state.last_uploaded_filenames = current_uploaded_filenames
-            
-            # Remove data for files that were removed
-            for removed_file in removed_files:
-                if removed_file in st.session_state.preprocessed_data:
-                    del st.session_state.preprocessed_data[removed_file]
-                    if removed_file in st.session_state.preprocessing_status:
-                        del st.session_state.preprocessing_status[removed_file]
-                    logger.info(f"Removed preprocessing data for {removed_file}")
-            
-            # Clear results when files change to avoid confusion
-            st.session_state.analysis_results = []
-            st.session_state.show_pdf = False
-            st.session_state.pdf_bytes = None
-            st.session_state.current_pdf_name = None
-            st.session_state.chat_messages = [] # Also clear chat on file change
-            logger.info("Cleared analysis results, PDF view, and chat due to file change.")
-
-            
-            # Process new files
-            if new_files:
-                # Create a dedicated status container for preprocessing progress
-                preprocess_status_container = st.empty()
-                preprocess_status_container.info(f"Starting preprocessing for {len(new_files)} document(s)...")
-                
-                # Simple spinner without detailed text that might expose comments
-                with st.spinner("Processing document(s)..."):
-                    # Use the 'current_files' list captured during the change event
-                    for i, filename in enumerate(sorted(list(new_files))): # Iterate reliably
-                        # Find the file object for this filename from the captured list
-                        file_obj = next((f for f in current_files if f.name == filename), None)
-                        if file_obj:
-                            try:
-                                # Update status message with current file being processed
-                                preprocess_status_container.info(f"Preprocessing file {i+1}/{len(new_files)}: {filename}")
-                                
-                                file_data = file_obj.getvalue()
-                                # Preprocess this file
-                                result = preprocess_file(
-                                    file_data, 
-                                    filename,
-                                    st.session_state.get("use_advanced_extraction", False)
-                                )
-                                # Store preprocessing status
-                                st.session_state.preprocessing_status[filename] = result
-                                logger.info(f"Preprocessed {filename}: {result['status']}")
-                                
-                                # Update status with completion of this file
-                                preprocess_status_container.info(f"Completed {i+1}/{len(new_files)} files. Last processed: {filename}")
-                            except Exception as e:
-                                logger.error(f"Failed to preprocess {filename}: {str(e)}", exc_info=True)
-                                st.session_state.preprocessing_status[filename] = {
-                                    "status": "error",
-                                    "message": f"Failed to preprocess: {str(e)}"
-                                }
-                                # Update status with error
-                                preprocess_status_container.warning(f"Error preprocessing file {i+1}/{len(new_files)}: {filename}")
-                    
-                    # Update final preprocessing status
-                    success_count = sum(1 for status in st.session_state.preprocessing_status.values() if status['status'] == 'success')
-                    preprocess_status_container.success(f"Preprocessing complete! {success_count}/{len(new_files)} files successfully preprocessed.")
-                
-                # Show preprocessing status or success message
-                preprocessing_failed = False
-                for filename, status in st.session_state.preprocessing_status.items():
-                    if status['status'] == 'error':
-                        st.error(f"Error preprocessing {filename}: {status['message']}")
-                        preprocessing_failed = True
-                    elif status['status'] == 'warning':
-                        st.warning(f"Warning for {filename}: {status['message']}")
-                
-                if not preprocessing_failed and new_files:
-                    st.success(f"Preprocessing complete for {len(new_files)} file(s)")
-        else:
-             # Filenames haven't changed, likely a spurious flag set
-             logger.debug("File change flag was True, but filename sets match. Ignoring spurious flag.")
-                     
-        # Clean up the temporary storage regardless
-        st.session_state.current_file_objects_from_change = None 
-
-    # --- Analysis Inputs ---
-    with st.container(border=False):
-        # st.subheader("Ask SmartDocs")
-        st.session_state.user_prompt = st.text_area(
-            "Analysis Prompt",
-            placeholder="Enter your analysis instructions. Multiple questions or tasks will be handled separately (e.g., 'What is the termination clause? What are the liability limits?')",
-            height=150,
-            key="prompt_input_decompose",
-            value=st.session_state.get("user_prompt", ""),
+    # Check if results exist
+    if st.session_state.get("analysis_results"):
+        # --- RESULTS VIEW ---
+        st.markdown("<h1 style='text-align: center;'>CNT SmartDocs</h1>", unsafe_allow_html=True)
+        st.markdown(
+            "<p style='text-align: center; font-style: italic;'>AI Powered Document Intelligence</p>",
+            unsafe_allow_html=True,
         )
 
-        # Optional: Keep advanced extraction toggle if needed
-        # st.session_state.use_advanced_extraction = st.toggle(...)
-
-
-    # --- Process Button ---
-    process_button_disabled = (
-        embedding_model is None
-        or not st.session_state.get('uploaded_file_objects')
-        or not st.session_state.get('user_prompt', '').strip()
-    )
-    if st.button("Process Documents", type="primary", use_container_width=True, disabled=process_button_disabled):
-        files_to_process = st.session_state.get("uploaded_file_objects", [])
-        current_user_prompt = st.session_state.get("user_prompt", "")
-        current_use_advanced = st.session_state.get("use_advanced_extraction", False) # Read if toggle exists
-
-        if not files_to_process: st.warning("Please upload one or more documents.")
-        elif not current_user_prompt.strip(): st.error("Please enter an Analysis Prompt.")
-        else:
-            st.session_state.analysis_results = []
-            st.session_state.show_pdf = False
-            st.session_state.pdf_bytes = None
-            st.session_state.current_pdf_name = None
-
-            total_files = len(files_to_process)
-            overall_start_time = datetime.now()
-            # Use a list that maps directly to input files to maintain order
-            results_placeholder = [None] * total_files
-            file_map = {i: f.name for i, f in enumerate(files_to_process)} # Map index to filename
-
-            process_args = []
-            files_read_ok = True
-            for i, uploaded_file in enumerate(files_to_process):
-                try:
-                    file_data = uploaded_file.getvalue()
-                    process_args.append(
-                        (file_data, uploaded_file.name, current_user_prompt, current_use_advanced)
-                    )
-                except Exception as read_err:
-                    logger.error(f"Failed to read file {uploaded_file.name}: {read_err}", exc_info=True)
-                    st.error(f"Failed to read file {uploaded_file.name}. Please re-upload.")
-                    results_placeholder[i] = {"filename": uploaded_file.name, "error": f"Failed to read file: {read_err}"}
-                    files_read_ok = False
-
-            if files_read_ok and process_args:
-                files_to_run_count = len(process_args)
-                
-                # Create a dedicated status container for progress messages
-                status_container = st.empty()
-                status_container.info(f"Starting to process {files_to_run_count} document(s)...")
-                
-                # Simple spinner without detailed text that might expose comments
-                with st.spinner("Analysing Query...",show_time=True):
-                    processed_indices = set()
-
-                    def run_task_with_index(item_index: int, args_tuple: tuple):
-                        """Wrapper to run task and return index + result."""
-                        filename = args_tuple[1]
-                        logger.info(f"Thread {threading.current_thread().name} starting task for index {item_index} ({filename})")
-                        
-                        # Update status message with current file being processed
-                        status_container.info(f"Processing file {item_index + 1}/{files_to_run_count}: {filename}")
-                        
-                        try:
-                            result = process_file_wrapper(args_tuple)
-                            logger.info(f"Thread {threading.current_thread().name} finished task for index {item_index} ({filename})")
-                            
-                            # Update status with completion of this file
-                            status_container.info(f"Completed {item_index + 1}/{files_to_run_count} files. Currently processing: {filename}")
-                            
-                            return item_index, result
-                        except Exception as thread_err:
-                            logger.error(f"Unhandled error in thread task for index {item_index} ({filename}): {thread_err}", exc_info=True)
-                            
-                            # Update status with error
-                            status_container.warning(f"Error processing file {item_index + 1}/{files_to_run_count}: {filename}")
-                            
-                            return item_index, {"filename": filename, "error": f"Unhandled thread error: {thread_err}"}
-
-                    # --- Execute Tasks ---
-                    try:
-                        if ENABLE_PARALLEL and files_to_run_count > 1:
-                            logger.info(f"Using ThreadPoolExecutor with {MAX_WORKERS} workers for {files_to_run_count} tasks.")
-                            with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                                future_map = {
-                                    executor.submit(run_task_with_index, i, arg_tuple): i
-                                    for i, arg_tuple in enumerate(process_args)
-                                }
-                                for future in concurrent.futures.as_completed(future_map):
-                                    original_index = future_map[future]
-                                    processed_indices.add(original_index)
-                                    try:
-                                        _, result_data = future.result()
-                                        results_placeholder[original_index] = result_data
-                                    except Exception as exc:
-                                        fname = file_map.get(original_index, f"File at index {original_index}")
-                                        logger.error(f'Task for index {original_index} ({fname}) failed: {exc}', exc_info=True)
-                                        results_placeholder[original_index] = {"filename": fname, "error": f"Task execution failed: {exc}"}
-                        else:
-                            logger.info(f"Processing {files_to_run_count} task(s) sequentially.")
-                            for i, arg_tuple in enumerate(process_args):
-                                original_index = i
-                                processed_indices.add(original_index)
-                                try:
-                                    _, result_data = run_task_with_index(original_index, arg_tuple)
-                                    results_placeholder[original_index] = result_data
-                                except Exception as seq_exc:
-                                     fname = file_map.get(original_index, f"File at index {original_index}")
-                                     logger.error(f'Sequential task for index {original_index} ({fname}) failed: {seq_exc}', exc_info=True)
-                                     results_placeholder[original_index] = {"filename": fname, "error": f"Task execution failed: {seq_exc}"}
-
-                    except Exception as pool_err:
-                         logger.error(f"Error during task execution setup/management: {pool_err}", exc_info=True)
-                         st.error(f"Error during processing: {pool_err}. Some files may not have been processed.")
-                         # Mark remaining unprocessed as errors
-                         for i in range(total_files):
-                              if i not in processed_indices and results_placeholder[i] is None:
-                                   fname = file_map.get(i, f"File at index {i}")
-                                   results_placeholder[i] = {"filename": fname, "error": f"Processing cancelled due to execution error: {pool_err}"}
-
-
-                    # --- Processing Done - Update State ---
-                    final_results = [r for r in results_placeholder if r is not None]
-                    st.session_state.analysis_results = final_results
-
-                    total_time = (datetime.now() - overall_start_time).total_seconds()
-                    success_count = len([r for r in final_results if isinstance(r, dict) and "error" not in r])
-                    logger.info(f"Processing batch complete. Processed {success_count}/{total_files} files successfully in {total_time:.2f}s.")
-                    
-                    # Update status message
-                    status_container.success(f"Processing complete! Processed {success_count}/{total_files} files successfully in {total_time:.2f} seconds.")
-
-                    # --- Set initial PDF view (first success) ---
-                    first_success = next((r for r in final_results if isinstance(r, dict) and "error" not in r), None)
-                    if first_success and first_success.get("annotated_pdf"):
-                        try:
-                            pdf_bytes = base64.b64decode(first_success["annotated_pdf"])
-                            update_pdf_view(pdf_bytes=pdf_bytes, page_num=1, filename=first_success.get("filename"))
-                        except Exception as decode_err:
-                            logger.error(f"Failed to decode/set initial PDF: {decode_err}", exc_info=True)
-                            st.error("Failed to load initial PDF view.")
-                            st.session_state.show_pdf = False
-                    elif first_success:
-                         logger.warning("First successful result missing annotated PDF data.")
-                         st.warning("Processing complete, but couldn't display the first annotated document.")
-                         st.session_state.show_pdf = False
-                    else:
-                         logger.warning("No successful results found. No initial PDF view shown.")
-                         st.session_state.show_pdf = False
-
-            # Rerun to display results / updated PDF view state
+        if st.button("🚀 Start New Analysis", key="new_analysis_button", use_container_width=True, type="primary"):
+            # Clear relevant session state variables
+            keys_to_clear = [
+                "analysis_results", "pdf_bytes", "show_pdf", 
+                "current_pdf_name", "chat_messages", "results_just_generated",
+                "user_prompt", "uploaded_file_objects", "last_uploaded_filenames",
+                "preprocessed_data", "preprocessing_status"
+            ]
+            for key in keys_to_clear:
+                if key in st.session_state:
+                    del st.session_state[key]
+            logger.info("Cleared state for new analysis.")
             st.rerun()
 
+        # Display Results Section (moved from outside)
+        st.divider()
 
-# --- Display Results Section (Shows after processing button clicked and page reruns) ---
-if st.session_state.get("analysis_results"):
-    st.divider()
-    st.markdown("## Processing Results")
+        results_to_display = st.session_state.get("analysis_results", [])
+        errors = [r for r in results_to_display if isinstance(r, dict) and "error" in r]
+        success_results = [r for r in results_to_display if isinstance(r, dict) and "error" not in r]
 
-    results_to_display = st.session_state.get("analysis_results", [])
-    errors = [r for r in results_to_display if isinstance(r, dict) and "error" in r]
-    success_results = [r for r in results_to_display if isinstance(r, dict) and "error" not in r]
+        # Status Summary
+        total_processed = len(results_to_display)
+        if errors:
+            if not success_results: st.error(f"Processing failed for all {total_processed} file(s). See details below.")
+            else: st.warning(f"Processing complete for {total_processed} file(s). {len(success_results)} succeeded, {len(errors)} failed.")
+        elif success_results: st.success(f"Successfully processed {len(success_results)} file(s).")
 
-    # --- Status Summary ---
-    total_processed = len(results_to_display)
-    if errors:
-        if not success_results: st.error(f"Processing failed for all {total_processed} file(s). See details below.")
-        else: st.warning(f"Processing complete for {total_processed} file(s). {len(success_results)} succeeded, {len(errors)} failed.")
-    elif success_results: st.success(f"Successfully processed {len(success_results)} file(s).")
+        # Error Details Expander
+        if errors:
+            with st.expander("⚠️ Processing Errors", expanded=True):
+                for error_res in errors:
+                    st.error(f"**{error_res.get('filename', 'Unknown File')}**: {error_res.get('error', 'Unknown error details.')}")
 
-    # --- Error Details Expander ---
-    if errors:
-        with st.expander("⚠️ Processing Errors", expanded=True):
-            for error_res in errors:
-                st.error(f"**{error_res.get('filename', 'Unknown File')}**: {error_res.get('error', 'Unknown error details.')}")
+        # Display Successful Analysis
+        if success_results:
+            display_analysis_results(success_results)
+        elif not errors:
+            st.warning("Processing finished, but no primary analysis content was generated.")
 
-    # --- Display Successful Analysis ---
-    # display_analysis_results now handles the aggregated JSON format
-    if success_results:
-        # Since aggregation happens per file, we still iterate, but usually expect one success item
-        # If multiple files were processed, display_analysis_results will render each one
-        display_analysis_results(success_results)
-    elif not errors:
-        # This case might happen if processing completed but yielded no actionable results (e.g., only info/skipped sections)
-        st.warning("Processing finished, but no primary analysis content was generated.")
+        # Auto-scroll logic (only runs when results are first shown)
+        if st.session_state.get("results_just_generated", False):
+            js = """
+            <script>
+                setTimeout(function() {
+                    const anchor = document.getElementById('results-anchor');
+                    if (anchor) {
+                        console.log("Scrolling to results anchor...");
+                        anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    }
+                }, 100);
+            </script>
+            """
+            st.components.v1.html(js, height=0)
+            st.session_state.results_just_generated = False # Reset flag after scroll
+
+    else:
+        # --- INPUT VIEW ---
+        st.markdown(
+            "<h1 style='text-align: center;'>CNT SmartDocs</h1>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            "<p style='text-align: center; font-style: italic;'>AI Powerered Document Intelligence</p>",
+            unsafe_allow_html=True,
+        )
+
+        # Check if embedding model loaded successfully (important for input view too)
+        if embedding_model is None:
+            st.error(
+                "Embedding model failed to load. Document processing is disabled. "
+                "Please check logs and ensure dependencies ('sentence-transformers', 'torch', etc.) are installed correctly."
+            )
+            return # Stop further UI rendering
+
+        # File Upload Callback
+        def handle_file_change():
+            current_files = st.session_state.get("file_uploader_decompose", [])
+            st.session_state.current_file_objects_from_change = current_files
+            st.session_state.file_selection_changed_by_user = True
+            logger.debug(f"handle_file_change: Stored {len(current_files) if current_files else 0} files. Flag set.")
+
+        # File Uploader
+        uploaded_files = st.file_uploader(
+            "Upload PDF or Word files",
+            type=["pdf", "docx"],
+            accept_multiple_files=True,
+            key="file_uploader_decompose",
+            on_change=handle_file_change,
+        )
+
+        # File Change Logic
+        if st.session_state.file_selection_changed_by_user:
+            logger.debug("Processing detected file change from user action.")
+            st.session_state.file_selection_changed_by_user = False
+            current_files = st.session_state.current_file_objects_from_change
+            current_uploaded_filenames = set(f.name for f in current_files) if current_files else set()
+            last_filenames = st.session_state.get('last_uploaded_filenames', set())
+
+            if current_uploaded_filenames != last_filenames:
+                logger.info(f"Actual file change confirmed: New={current_uploaded_filenames - last_filenames}, Removed={last_filenames - current_uploaded_filenames}")
+                new_files = current_uploaded_filenames - last_filenames
+                removed_files = last_filenames - current_uploaded_filenames
+                st.session_state.uploaded_file_objects = current_files
+                st.session_state.last_uploaded_filenames = current_uploaded_filenames
+
+                for removed_file in removed_files:
+                    if removed_file in st.session_state.preprocessed_data:
+                        del st.session_state.preprocessed_data[removed_file]
+                        if removed_file in st.session_state.preprocessing_status:
+                            del st.session_state.preprocessing_status[removed_file]
+                        logger.info(f"Removed preprocessing data for {removed_file}")
+                
+                st.session_state.analysis_results = [] # Clear any old results if files change
+                st.session_state.chat_messages = [] # Clear chat too
+                logger.info("Cleared relevant state due to file change.")
+
+                if new_files:
+                    preprocess_status_container = st.empty()
+                    preprocess_status_container.info(f"Starting preprocessing for {len(new_files)} document(s)...")
+                    with st.spinner("Preprocessing document(s)..."):
+                        for i, filename in enumerate(sorted(list(new_files))):
+                            file_obj = next((f for f in current_files if f.name == filename), None)
+                            if file_obj:
+                                try:
+                                    preprocess_status_container.info(f"Preprocessing file {i+1}/{len(new_files)}: {filename}")
+                                    file_data = file_obj.getvalue()
+                                    result = preprocess_file(
+                                        file_data, 
+                                        filename,
+                                        st.session_state.get("use_advanced_extraction", False)
+                                    )
+                                    st.session_state.preprocessing_status[filename] = result
+                                    logger.info(f"Preprocessed {filename}: {result['status']}")
+                                    preprocess_status_container.info(f"Completed {i+1}/{len(new_files)} files. Last processed: {filename}")
+                                except Exception as e:
+                                    logger.error(f"Failed to preprocess {filename}: {str(e)}", exc_info=True)
+                                    st.session_state.preprocessing_status[filename] = {"status": "error", "message": f"Failed to preprocess: {str(e)}"}
+                                    preprocess_status_container.warning(f"Error preprocessing file {i+1}/{len(new_files)}: {filename}")
+                        
+                        success_count = sum(1 for status in st.session_state.preprocessing_status.values() if status['status'] == 'success')
+                        preprocess_status_container.success(f"Preprocessing complete! {success_count}/{len(new_files)} files successfully preprocessed.")
+                    
+                    preprocessing_failed = False
+                    for filename, status in st.session_state.preprocessing_status.items():
+                        if status['status'] == 'error':
+                            st.error(f"Error preprocessing {filename}: {status['message']}")
+                            preprocessing_failed = True
+                        elif status['status'] == 'warning':
+                            st.warning(f"Warning for {filename}: {status['message']}")
+                    
+                    if not preprocessing_failed and new_files:
+                        st.success(f"Preprocessing complete for {len(new_files)} file(s)")
+            else:
+                 logger.debug("File change flag was True, but filename sets match. Ignoring spurious flag.")
+                         
+            st.session_state.current_file_objects_from_change = None 
+
+        # Analysis Inputs
+        with st.container(border=False):
+            st.session_state.user_prompt = st.text_area(
+                "Analysis Prompt",
+                placeholder="Enter your analysis instructions...",
+                height=150,
+                key="prompt_input_decompose",
+                value=st.session_state.get("user_prompt", ""),
+            )
+
+        # Process Button
+        process_button_disabled = (
+            embedding_model is None
+            or not st.session_state.get('uploaded_file_objects')
+            or not st.session_state.get('user_prompt', '').strip()
+        )
+        if st.button("Process Documents", type="primary", use_container_width=True, disabled=process_button_disabled):
+            files_to_process = st.session_state.get("uploaded_file_objects", [])
+            current_user_prompt = st.session_state.get("user_prompt", "")
+            current_use_advanced = st.session_state.get("use_advanced_extraction", False)
+
+            if not files_to_process: st.warning("Please upload one or more documents.")
+            elif not current_user_prompt.strip(): st.error("Please enter an Analysis Prompt.")
+            else:
+                st.session_state.analysis_results = [] # Clear previous results before processing
+                st.session_state.show_pdf = False
+                st.session_state.pdf_bytes = None
+                st.session_state.current_pdf_name = None
+
+                total_files = len(files_to_process)
+                overall_start_time = datetime.now()
+                results_placeholder = [None] * total_files
+                file_map = {i: f.name for i, f in enumerate(files_to_process)}
+
+                process_args = []
+                files_read_ok = True
+                for i, uploaded_file in enumerate(files_to_process):
+                    try:
+                        file_data = uploaded_file.getvalue()
+                        # Add the preprocessed data for this file to the args
+                        preprocessed_file_data = st.session_state.get("preprocessed_data", {}).get(uploaded_file.name)
+                        process_args.append(
+                            (file_data, uploaded_file.name, current_user_prompt, current_use_advanced, preprocessed_file_data)
+                        )
+                    except Exception as read_err:
+                        logger.error(f"Failed to read file {uploaded_file.name}: {read_err}", exc_info=True)
+                        st.error(f"Failed to read file {uploaded_file.name}. Please re-upload.")
+                        results_placeholder[i] = {"filename": uploaded_file.name, "error": f"Failed to read file: {read_err}"}
+                        files_read_ok = False
+
+                if files_read_ok and process_args:
+                    files_to_run_count = len(process_args)
+                    status_container = st.empty()
+                    status_container.info(f"Starting to process {files_to_run_count} document(s)...")
+                    
+                    with st.spinner("Analysing Query...", show_time=True):
+                        processed_indices = set()
+                        def run_task_with_index(item_index: int, args_tuple: tuple):
+                            filename = args_tuple[1]
+                            logger.info(f"Thread {threading.current_thread().name} starting task for index {item_index} ({filename})")
+                            # REMOVED: status_container.info(f"Processing file {item_index + 1}/{files_to_run_count}: {filename}")
+                            try:
+                                result = process_file_wrapper(args_tuple)
+                                logger.info(f"Thread {threading.current_thread().name} finished task for index {item_index} ({filename})")
+                                # REMOVED: status_container.info(f"Completed {item_index + 1}/{files_to_run_count} files. Currently processing: {filename}")
+                                return item_index, result
+                            except Exception as thread_err:
+                                logger.error(f"Unhandled error in thread task for index {item_index} ({filename}): {thread_err}", exc_info=True)
+                                # REMOVED: status_container.warning(f"Error processing file {item_index + 1}/{files_to_run_count}: {filename}")
+                                return item_index, {"filename": filename, "error": f"Unhandled thread error: {thread_err}"}
+
+                        try:
+                            if ENABLE_PARALLEL and files_to_run_count > 1:
+                                logger.info(f"Using ThreadPoolExecutor with {MAX_WORKERS} workers for {files_to_run_count} tasks.")
+                                with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                                    future_map = {executor.submit(run_task_with_index, i, arg_tuple): i for i, arg_tuple in enumerate(process_args)}
+                                    for future in concurrent.futures.as_completed(future_map):
+                                        original_index = future_map[future]
+                                        processed_indices.add(original_index)
+                                        try:
+                                            _, result_data = future.result()
+                                            results_placeholder[original_index] = result_data
+                                        except Exception as exc:
+                                            fname = file_map.get(original_index, f"File at index {original_index}")
+                                            logger.error(f'Task for index {original_index} ({fname}) failed: {exc}', exc_info=True)
+                                            results_placeholder[original_index] = {"filename": fname, "error": f"Task execution failed: {exc}"}
+                            else:
+                                logger.info(f"Processing {files_to_run_count} task(s) sequentially.")
+                                for i, arg_tuple in enumerate(process_args):
+                                    original_index = i
+                                    processed_indices.add(original_index)
+                                    try:
+                                        _, result_data = run_task_with_index(original_index, arg_tuple)
+                                        results_placeholder[original_index] = result_data
+                                    except Exception as seq_exc:
+                                         fname = file_map.get(original_index, f"File at index {original_index}")
+                                         logger.error(f'Sequential task for index {original_index} ({fname}) failed: {seq_exc}', exc_info=True)
+                                         results_placeholder[original_index] = {"filename": fname, "error": f"Task execution failed: {seq_exc}"}
+
+                        except Exception as pool_err:
+                             logger.error(f"Error during task execution setup/management: {pool_err}", exc_info=True)
+                             st.error(f"Error during processing: {pool_err}. Some files may not have been processed.")
+                             for i in range(total_files):
+                                  if i not in processed_indices and results_placeholder[i] is None:
+                                       fname = file_map.get(i, f"File at index {i}")
+                                       results_placeholder[i] = {"filename": fname, "error": f"Processing cancelled due to execution error: {pool_err}"}
+
+                        final_results = [r for r in results_placeholder if r is not None]
+                        st.session_state.analysis_results = final_results
+                        total_time = (datetime.now() - overall_start_time).total_seconds()
+                        success_count = len([r for r in final_results if isinstance(r, dict) and "error" not in r])
+                        logger.info(f"Processing batch complete. Processed {success_count}/{total_files} files successfully in {total_time:.2f}s.")
+                        status_container.success(f"Processing complete! Processed {success_count}/{total_files} files successfully in {total_time:.2f} seconds.")
+
+                        first_success = next((r for r in final_results if isinstance(r, dict) and "error" not in r), None)
+                        if first_success and first_success.get("annotated_pdf"):
+                            try:
+                                pdf_bytes = base64.b64decode(first_success["annotated_pdf"])
+                                update_pdf_view(pdf_bytes=pdf_bytes, page_num=1, filename=first_success.get("filename"))
+                            except Exception as decode_err:
+                                logger.error(f"Failed to decode/set initial PDF: {decode_err}", exc_info=True)
+                                st.error("Failed to load initial PDF view.")
+                                st.session_state.show_pdf = False
+                        elif first_success:
+                             logger.warning("First successful result missing annotated PDF data.")
+                             st.warning("Processing complete, but couldn't display the first annotated document.")
+                             st.session_state.show_pdf = False
+                        else:
+                             logger.warning("No successful results found. No initial PDF view shown.")
+                             st.session_state.show_pdf = False
+
+                # Set flag to trigger scroll on next rerun
+                if success_count > 0:
+                    st.session_state.results_just_generated = True
+
+                # Rerun to display results / updated PDF view state
+                st.rerun()
 
 
 # --- Main Execution Guard ---
