@@ -1951,6 +1951,7 @@ def display_chat_message_with_citations(processed_text: str, citation_details: L
 
     # Display the citation sources below if any exist
     if citation_details:
+        st.markdown("---") # Add a separator
         st.caption("Sources:")
         # Use columns for a slightly more compact layout if many sources
         num_columns = min(len(citation_details), 3) # Max 3 columns
