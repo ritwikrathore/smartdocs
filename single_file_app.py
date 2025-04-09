@@ -31,6 +31,8 @@ from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer, util
 from thefuzz import fuzz
 import openai  # Added for Azure OpenAI integration
+import zipfile
+import urllib.parse
 
 # --- Configuration ---
 logging.basicConfig(
@@ -1940,7 +1942,17 @@ def display_analysis_results(analysis_results: List[Dict[str, Any]]):
                                 if not isinstance(supporting_phrases, list): supporting_phrases = []
 
                                 if supporting_phrases:
-                                    with st.expander("Supporting Citations", expanded=False):
+                                    # --- Determine if the expander should be open by default ---
+                                    expand_citations = False
+                                    for phrase_text in supporting_phrases:
+                                        if isinstance(phrase_text, str) and phrase_text != "No relevant phrase found.":
+                                            is_verified = verification_results.get(phrase_text, False)
+                                            if not is_verified:
+                                                expand_citations = True
+                                                break # Found one unverified, no need to check further
+
+                                    # --- Create the expander with conditional expansion ---
+                                    with st.expander("Supporting Citations", expanded=expand_citations):
                                         has_citations_to_show = False
                                         for phrase_idx, phrase_text in enumerate(supporting_phrases):
                                             if not isinstance(phrase_text, str) or phrase_text == "No relevant phrase found.":
@@ -2137,15 +2149,120 @@ def display_analysis_results(analysis_results: List[Dict[str, Any]]):
                     st.info("No analysis results available to export.")
 
             # --- Report Issue Expander --- 
-            with st.expander("Report Issue", expanded=False):
-                st.markdown("Encountered an issue? Please describe it below.")
-                issue_text = st.text_area("Issue Description", key="issue_desc")
-                if st.button("Submit Issue Report", key="submit_issue"):
-                    if issue_text:
-                        logger.warning(f"ISSUE REPORTED by user: {issue_text}")
-                        st.success("Thank you for your feedback!")
+            with st.expander("⚠️ Report Issue", expanded=False):
+                st.markdown("""
+                    ### Report an Issue
+                    If you encounter an issue, please describe it below, download the report package, and then **manually email the package** to CNT_Automations@ifc.org.
+                """)
+                
+                # Issue description
+                issue_description = st.text_area(
+                    "Describe the issue",
+                    placeholder="Please describe what went wrong or what results were inaccurate...",
+                    height=100,
+                    key="issue_description_input" # Added a key
+                )
+
+                report_package_bytes = None
+                report_filename = f'issue_report_{datetime.now().strftime("%Y%m%d_%H%M%S")}.zip'
+
+                # --- Inner function to create the report package --- 
+                # ... (create_report_package_content function remains the same) ...
+                def create_report_package_content(desc):
+                    try:
+                        report_data = {
+                            "timestamp": datetime.now().isoformat(),
+                            "issue_description": desc, # Use passed description
+                            "user_inputs": {
+                                "prompt": st.session_state.get('user_prompt', ''),
+                                # Add safe .get() for potentially missing keys
+                                "threshold": st.session_state.get('threshold', None),
+                                "keywords_input": st.session_state.get('keywords_input', None),
+                                "generated_keywords": st.session_state.get('generated_keywords', None)
+                            },
+                            # Make sure analysis_results is serializable (it should be if it's based on JSON)
+                            "analysis_results": st.session_state.get('analysis_results', None),
+                            "current_document": st.session_state.get('current_pdf_name', None),
+                            "preprocessed_data_keys": list(st.session_state.get('preprocessed_data', {}).keys()),
+                            "chat_history_summary": [
+                                {"role": msg.get("role"), "content_preview": msg.get("content", "")[:100]+"..."}
+                                for msg in st.session_state.get("chat_messages", [])
+                            ]
+                        }
+                        
+                        zip_buffer = BytesIO()
+                        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                            # Write report data as JSON
+                            try:
+                                zip_file.writestr('report_data.json', json.dumps(report_data, indent=2, default=str)) # Add default=str for non-serializable types
+                            except Exception as json_err:
+                                zip_file.writestr('report_data_error.txt', f"Error serializing report data: {json_err}")
+                                logger.error(f"Error serializing report_data.json: {json_err}", exc_info=True)
+
+                            # Write original uploaded files
+                            uploaded_file_objs = st.session_state.get('uploaded_file_objects') # Use correct key
+                            if uploaded_file_objs:
+                                for uploaded_file in uploaded_file_objs:
+                                    try:
+                                        # Ensure the file object is valid and readable
+                                        if hasattr(uploaded_file, 'name') and hasattr(uploaded_file, 'getvalue'):
+                                            zip_file.writestr(f'original_docs/{uploaded_file.name}', uploaded_file.getvalue())
+                                        else:
+                                             logger.warning(f"Skipping invalid file object in uploaded_file_objects during report creation: {type(uploaded_file)}")
+                                    except Exception as file_read_err:
+                                        zip_file.writestr(f'original_docs/ERROR_{uploaded_file.name}.txt', f"Error reading file: {file_read_err}")
+                                        logger.error(f"Error reading file {uploaded_file.name} for report package: {file_read_err}", exc_info=True)
+
+                            # Write annotated PDFs
+                            analysis_results_list = st.session_state.get('analysis_results')
+                            if analysis_results_list:
+                                for result in analysis_results_list:
+                                    if isinstance(result, dict) and 'annotated_pdf' in result and result.get('annotated_pdf'):
+                                        try:
+                                            pdf_bytes = base64.b64decode(result['annotated_pdf'])
+                                            pdf_filename = result.get('filename', f'unknown_annotated_{result.get("timestamp", "ts")}.pdf')
+                                            zip_file.writestr(f'annotated_pdfs/{pdf_filename}', pdf_bytes)
+                                        except Exception as pdf_err:
+                                             zip_file.writestr(f'annotated_pdfs/ERROR_{result.get("filename", "unknown")}.txt', f"Error decoding/writing PDF: {pdf_err}")
+                                             logger.error(f"Error writing annotated PDF {result.get('filename')} to report: {pdf_err}", exc_info=True)
+                        
+                        zip_buffer.seek(0)
+                        return zip_buffer.getvalue()
+                    except Exception as zip_e:
+                        logger.error(f"Error creating report package zip file: {zip_e}", exc_info=True)
+                        # Create a simple error zip as fallback
+                        zip_buffer = BytesIO()
+                        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                            zip_file.writestr('error_creating_report.txt', f"Failed to create full report package: {zip_e}")
+                        zip_buffer.seek(0)
+                        return zip_buffer.getvalue()
+                # --- End of inner function ---
+
+                # Button to download the package (now takes full width)
+                download_disabled = not issue_description.strip()
+                try:
+                    # Generate package content only if description is provided
+                    if not download_disabled:
+                        report_package_bytes = create_report_package_content(issue_description)
                     else:
-                        st.warning("Please describe the issue before submitting.")
+                        report_package_bytes = b"" # Ensure it's defined as empty bytes if disabled
+
+                    st.download_button(
+                        label="📥 Download Report Package",
+                        on_click="ignore",
+                        data=report_package_bytes,
+                        file_name=report_filename,
+                        mime='application/zip',
+                        disabled=download_disabled,
+                        help="Provide an issue description first, then download the package to attach to your email.",
+                        key="download_report_button",
+                        use_container_width=True # Make button full width
+                    )
+                except Exception as e:
+                    st.error(f"Error preparing report package: {str(e)}")
+                    logger.error(f"Error preparing report package for download button: {str(e)}", exc_info=True)
+
+                # Removed the Mail client button/link section
 
         # --- PDF Viewer Display (Remains outside the container, at the END) --- 
         display_pdf_viewer()
