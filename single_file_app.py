@@ -44,6 +44,219 @@ load_dotenv()
 st.set_page_config(layout="wide", page_title="CNT SmartDocs")
 # ****** END SET PAGE CONFIG ******
 
+# --- Load images as base64 for embedding in CSS ---
+def get_base64_encoded_image(image_path):
+    with open(image_path, "rb") as img_file:
+        return base64.b64encode(img_file.read()).decode()
+
+# Load all the required images
+try:
+    mascot_base64 = get_base64_encoded_image("assets/mascot.png")
+    ifcontrollers_base64 = get_base64_encoded_image("assets/ifcontrollers.png") 
+    smartdocs_logo_base64 = get_base64_encoded_image("assets/smartdocslogo.png")
+    images_loaded = True
+    logger.info("Successfully loaded all brand images")
+except Exception as e:
+    logger.error(f"Failed to load one or more images: {e}")
+    images_loaded = False
+    mascot_base64 = ""
+    ifcontrollers_base64 = ""
+    smartdocs_logo_base64 = ""
+
+# Create checkmark icon for features list
+check_base64 = get_base64_encoded_image("assets/correct.png")
+check_img = f'<img src="data:image/png;base64,{check_base64}" class="check-icon" alt="✓">' if check_base64 else "✅"
+
+# --- Custom CSS Styling ---
+# Define primary colors
+PROCESS_CYAN = "#00ADE4"
+DARK_BLUE = "#002345"
+LIGHT_BLUE_TINT = "#E6F7FD" # Example tint (adjust as needed)
+VERY_LIGHT_GRAY = "#FAFAFA"
+
+st.markdown(f"""
+<style>
+    /* Base Styling */
+    .stApp {{
+        background-color: white; /* Light background */
+    }}
+
+    /* Headings */
+    h1, h2, h3, h4, h5, h6 {{
+        color: {DARK_BLUE};
+    }}
+    h1 {{ /* Center Main Title */
+        text-align: center;
+    }}
+
+    /* Buttons */
+    .stButton > button[kind="primary"] {{
+        background-color: {PROCESS_CYAN};
+        color: white;
+        border: 1px solid {PROCESS_CYAN};
+    }}
+    .stButton > button[kind="primary"]:hover {{
+        background-color: {DARK_BLUE};
+        color: white;
+        border: 1px solid {DARK_BLUE};
+    }}
+     .stButton > button[kind="primary"]:disabled {{
+        background-color: #cccccc;
+        color: #666666;
+        border: 1px solid #cccccc;
+    }}
+
+    .stButton > button[kind="secondary"] {{
+        color: {DARK_BLUE};
+        border: 1px solid {DARK_BLUE};
+    }}
+    .stButton > button[kind="secondary"]:hover {{
+        border-color: {PROCESS_CYAN};
+        color: {PROCESS_CYAN};
+        background-color: rgba(0, 173, 228, 0.1); /* Light Process Cyan background */
+    }}
+     .stButton > button[kind="secondary"]:disabled {{
+        color: #aaaaaa;
+        border-color: #dddddd;
+    }}
+
+    /* Expanders */
+    .stExpander > summary {{
+        background-color: {LIGHT_BLUE_TINT};
+        color: {DARK_BLUE};
+        border-radius: 0.25rem;
+        border: 1px solid rgba(0, 173, 228, 0.2); /* Subtle border */
+    }}
+    .stExpander > summary:hover {{
+        background-color: rgba(0, 173, 228, 0.2); /* Slightly darker tint on hover */
+    }}
+    .stExpander > summary svg {{ /* Expander Icon Color */
+        fill: {DARK_BLUE};
+    }}
+
+    /* Container Borders */
+    /* Targeting containers used for analysis sections and chat */
+    .st-emotion-cache-1r6slb0 {{ /* This selector might be fragile, adjust if needed */
+        border: 1px solid {LIGHT_BLUE_TINT};
+    }}
+    .st-emotion-cache-lrl5gf {{ /* This selector might be fragile, adjust if needed */
+         border: 1px solid {LIGHT_BLUE_TINT};
+    }}
+
+    /* Download Button */
+    .stDownloadButton > button {{
+        background-color: {DARK_BLUE};
+        color: white;
+        border: 1px solid {DARK_BLUE};
+    }}
+    .stDownloadButton > button:hover {{
+        background-color: {PROCESS_CYAN};
+        color: {DARK_BLUE};
+        border: 1px solid {PROCESS_CYAN};
+    }}
+
+    /* Text Input / Area */
+    .stTextInput, .stTextArea {{
+        border-color: rgba(0, 35, 69, 0.2); /* Subtle dark blue border */
+    }}
+
+    /* Mascot Image - Fixed Position at Bottom Right */
+    .mascot-image {{
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        width: 150px; /* Adjust size as needed */
+        z-index: 0; /* Lower z-index to ensure it's in the background */
+        opacity: 0.7; /* Slightly more transparent */
+        pointer-events: none; /* Prevents the mascot from intercepting mouse clicks */
+    }}
+
+    /* IF Controller Logo - Absolute Position at Top Left */
+    .ifcontroller-logo {{
+        position: absolute;
+        top: -30px;
+        margin-right: 45rem;
+        margin-left: -1rem;
+        z-index: 999;
+    }}
+
+    /* SmartDocs Logo Container - For the center top position */
+    .smartdocs-logo-container {{
+        display: flex;
+        justify-content: center;
+        margin-bottom: 0rem;
+        margin-top: 3rem;
+    }}
+
+    /* SmartDocs Logo */
+    .smartdocs-logo {{
+        height: 70px; /* Adjust size as needed */
+        margin-top: 1rem;
+    }}
+
+    /* Hide default title */
+    .st-emotion-cache-10trblm {{
+        display: none;
+    }}
+    
+    /* Features Container Styling */
+    .features-container {{
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        padding: 20px;
+        border-radius: 10px;
+    }}
+    
+    .features-row {{
+        display: flex;
+        justify-content: space-between;
+        width: 80%;
+        margin: 10px 0;
+    }}
+    
+    .feature-text {{
+        width: 48%;
+        background-color: white;
+        padding: 15px;
+        border-radius: 8px;
+        box-shadow: 2px 2px 10px rgba(0, 0, 0, 0.1);
+        font-size: 14px;
+        font-family: Arial, sans-serif;
+        display: flex;
+        align-items: center;
+        border: 1px solid {LIGHT_BLUE_TINT};
+    }}
+    
+    .welcome-header {{
+        color: {DARK_BLUE};
+        font-size: 24px;
+        text-align: center;
+        margin-bottom: 20px;
+        font-weight: 500;
+    }}
+</style>
+
+<!-- Fixed Mascot Image -->
+<div class="mascot-image">
+    <img src="data:image/png;base64,{mascot_base64}" alt="Mascot">
+</div>
+
+<!-- Fixed IF Controller Logo -->
+<div class="ifcontroller-logo">
+    <img src="data:image/png;base64,{ifcontrollers_base64}" alt="IF Controllers Logo">
+</div>
+
+<!-- SmartDocs Logo (will be placed at the beginning of the content) -->
+<div class="smartdocs-logo-container">
+    <img src="data:image/png;base64,{smartdocs_logo_base64}" alt="SmartDocs Logo" class="smartdocs-logo">
+</div>
+""", unsafe_allow_html=True)
+# --- End Custom CSS Styling ---
+
+
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", 4))
 ENABLE_PARALLEL = os.environ.get("ENABLE_PARALLEL", "true").lower() == "true"
 FUZZY_MATCH_THRESHOLD = 88  # Adjust this threshold (0-100)
@@ -1456,10 +1669,120 @@ def display_analysis_results(analysis_results: List[Dict[str, Any]]):
         logger.info("No analysis results to display.")
         return
 
+    # Add custom styling for the analysis display
+    st.markdown("""
+    <style>
+    /* Common styles for containers */
+    .sleek-container {
+        background-color: #f5f5f5;
+        border-radius: 8px;
+        padding: 8px 16px;
+        margin: 0 0 16px 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border: 1px solid #e0e0e0;
+    }
+    
+    /* Header title styling */
+    .header-title {
+        font-weight: 700;
+        font-size: 1.5rem;
+        color: #333;
+        margin: 0;
+        padding: 0;
+    }
+    
+    /* File info container */
+    .file-info-container {
+        display: flex;
+        align-items: center;
+        padding: 0;
+        margin: 0;
+    }
+    
+    /* File name styling */
+    .file-name {
+        font-weight: 600;
+        color: #424242;
+        font-size: 1rem;
+        display: flex;
+        align-items: center;
+        margin: 0;
+        padding: 0;
+    }
+    
+    /* File icon styling */
+    .file-icon {
+        color: #1976d2;
+        margin-right: 8px;
+    }
+    
+    /* Button container */
+    .button-container {
+        display: flex;
+        gap: 8px;
+    }
+    
+    /* Adjust button vertical alignment and size */
+    .stButton > button {
+        margin-top: 0 !important;
+        padding-top: 2px !important;
+        padding-bottom: 2px !important;
+        line-height: 1.2 !important;
+    }
+    
+    /* Remove extra padding from Streamlit containers */
+    .block-container {
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+    }
+    
+    /* Reduce padding in st.container */
+    .css-ocqkz7 {
+        padding: 0 !important;
+    }
+    
+    /* Custom container for buttons */
+    .button-row {
+        display: flex;
+        flex-direction: row;
+        justify-content: flex-end;
+        align-items: center;
+        gap: 10px;
+        width: 100%;
+        flex-wrap: nowrap;
+    }
+    
+    /* Make buttons more compact */
+    .stButton > button {
+        margin-top: 0 !important;
+        margin-bottom: 0 !important;
+        padding: 2px 8px !important;
+        line-height: 1.2 !important;
+        white-space: nowrap !important;
+        font-size: 0.9rem !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
     analysis_col, pdf_col = st.columns([2.5, 1.5], gap="small")
 
     with analysis_col:
-        st.markdown("### AI Analysis Results")
+        # Create two columns for the header layout
+        header_col1, header_col2 = st.columns([0.6, 0.4])
+        
+        # Add the title in the first column
+        with header_col1:
+            st.markdown('<div class="header-title">AI Analysis Results</div>', unsafe_allow_html=True)
+        
+        # Add the title in the second column (empty for now)
+        with header_col2:
+            # Empty space for alignment
+            st.write("")
+        
+        # Add a thin divider after the header section
+        st.markdown('<hr style="margin: 12px 0; border: 0; border-top: 1px solid #e0e0e0;">', unsafe_allow_html=True)
 
         # Filter results first
         success_results = [
@@ -1510,24 +1833,44 @@ def display_analysis_results(analysis_results: List[Dict[str, Any]]):
                     verification_results = result.get("verification_results", {})
                     phrase_locations = result.get("phrase_locations", {})
                     annotated_pdf_b64 = result.get("annotated_pdf")
-
-                    # --- Filename Title and Download Button --- 
-                    title_col, button_col = st.columns([0.85, 0.15], gap="small", vertical_alignment="bottom")
-                    with title_col:
-                        # Removed the markdown h5 title, tab serves as title 
-                        pass # st.markdown(f"##### {filename}")
-
-                    with button_col:
+                    
+                    # Create a sleeker container for file information
+                    # Create two columns for the file info layout
+                    file_col1, file_col2 = st.columns([0.8, 0.2])
+                    
+                    # Add the filename in the first column
+                    with file_col1:
+                        st.markdown(f"""
+                        <div class="sleek-container" style="margin-bottom: 16px;">
+                            <div class="file-name">
+                                <span class="file-icon">📄</span> {filename}
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    # Add download button in the second column
+                    with file_col2:
                         if annotated_pdf_b64:
                             try:
                                 annotated_pdf_bytes = base64.b64decode(annotated_pdf_b64)
-                                download_key = f"download_{filename}_{i}" # Unique key per tab
+                                # Determine if this is a PDF or Word document
+                                is_word_doc = filename.lower().endswith('.docx')
+                                
+                                # Set appropriate label and file extension
+                                if is_word_doc:
+                                    download_label = "Download Annotated PDF"
+                                    file_extension = '.pdf'
+                                else:
+                                    download_label = "Download Annotated PDF"
+                                    file_extension = '.pdf'
+                                
+                                # Add download button
                                 st.download_button(
                                     label="💾 PDF",
                                     data=annotated_pdf_bytes,
-                                    file_name=f"annotated_{filename}",
+                                    file_name=f"{filename.replace('.pdf', '').replace('.docx', '')}_annotated{file_extension}",
                                     mime="application/pdf",
-                                    key=download_key,
+                                    key=f"download_{filename}_{i}",
                                     help=f"Download annotated PDF for {filename}",
                                     use_container_width=True,
                                 )
@@ -1544,10 +1887,6 @@ def display_analysis_results(analysis_results: List[Dict[str, Any]]):
                             st.warning("No analysis sections found in the AI response for this file.")
                             continue # Skip to next tab
 
-                        # Display overall analysis title if present 
-                        if ai_analysis.get("title"):
-                            st.markdown(f"##### {ai_analysis['title']}")
-
                         citation_counter = 0
                         for section_key, section_data in analysis_sections.items():
                             if not isinstance(section_data, dict): continue
@@ -1558,12 +1897,44 @@ def display_analysis_results(analysis_results: List[Dict[str, Any]]):
 
                             display_section_name = section_key.replace("_", " ").title()
 
+                            # Create a container for the section title with improved styling
+                            with st.container(border=False):
+                                st.markdown(f"""
+                                    <div style='background-color: #f5f5f5; padding: 0px 16px; border-radius: 8px; 
+                                            margin: 16px 0 8px 0; border-left: 4px solid #1976d2;'>
+                                        <h4 style='color: #333; font-size: 1.2rem; margin: 0; font-weight: 600;'>
+                                            {display_section_name}
+                                        </h4>
+                                    </div>
+                                """, unsafe_allow_html=True)
+                            
+                            # Section content in a bordered container
                             with st.container(border=True):
-                                st.markdown(f"##### {display_section_name}")
                                 if section_data.get("Analysis"):
-                                    st.markdown(section_data["Analysis"], unsafe_allow_html=False)
-                                if section_data.get("Context"):
-                                    st.caption(f"Context: {section_data['Context']}")
+                                    # Create a container for both analysis and context
+                                    with st.container():
+                                        # Render the analysis section with context included directly
+                                        analysis_html = f"""
+                                            <div style='background-color: #f8f9fa; padding: .5rem; border-radius: 0.5rem; margin-bottom: 1rem;'>
+                                                <h4 style='color: #1e88e5; font-size: 1.1rem;'>
+                                                    Analysis
+                                                </h4>
+                                                <div style='color: #424242; line-height: 1.6;'>
+                                                    {section_data["Analysis"]}"""
+                                        
+                                        # Add context directly in the analysis div if it exists
+                                        if section_data.get("Context"):
+                                            analysis_html += f"""
+                                                    <div style='margin-top: 0.8rem; border-top: 1px solid #e0e0e0; padding-top: 0.8rem;'>
+                                                        <span style='color: #1b5e20; font-size: 0.9rem; line-height: 1.4;'>{section_data.get("Context", "")}</span>
+                                                    </div>"""
+                                        
+                                        # Close the divs and render the HTML
+                                        analysis_html += """
+                                                </div>
+                                            </div>
+                                        """
+                                        st.markdown(analysis_html, unsafe_allow_html=True)
 
                                 supporting_phrases = section_data.get("Supporting_Phrases", section_data.get("supporting_quotes", []))
                                 if not isinstance(supporting_phrases, list): supporting_phrases = []
@@ -1625,12 +1996,16 @@ def display_analysis_results(analysis_results: List[Dict[str, Any]]):
 
     # --- PDF Viewer and Tools Column --- 
     with pdf_col:
-        st.markdown("### Analysis Tools & PDF Viewer")
+        # Update this to use header-title styling to match AI Analysis Results
+        st.markdown('<div class="header-title">Analysis Tools & PDF Viewer</div>', unsafe_allow_html=True)
+        
+        # Add a thin divider after the header section
+        st.markdown('<hr style="margin: 12px 0; border: 0; border-top: 1px solid #e0e0e0;">', unsafe_allow_html=True)
 
         # --- Wrap Tool Expanders in a Container --- 
         with st.container():
             # --- Chat Interface Expander --- 
-            with st.expander("💬 SmartChat", expanded=False):
+            with st.expander("SmartChat", expanded=False):
                 if not st.session_state.get("preprocessed_data"):
                     st.info("Upload and process documents to enable chat.")
                 else:
@@ -1675,7 +2050,7 @@ def display_analysis_results(analysis_results: List[Dict[str, Any]]):
                         st.rerun()
 
             # --- Export Expander --- 
-            with st.expander("📊 Export Results", expanded=False):
+            with st.expander("Export Results", expanded=False):
                 # Use results_with_real_analysis which contains successful results with content
                 if results_with_real_analysis:
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1762,7 +2137,7 @@ def display_analysis_results(analysis_results: List[Dict[str, Any]]):
                     st.info("No analysis results available to export.")
 
             # --- Report Issue Expander --- 
-            with st.expander("⚠️ Report Issue", expanded=False):
+            with st.expander("Report Issue", expanded=False):
                 st.markdown("Encountered an issue? Please describe it below.")
                 issue_text = st.text_area("Issue Description", key="issue_desc")
                 if st.button("Submit Issue Report", key="submit_issue"):
@@ -2339,15 +2714,11 @@ def process_file_wrapper(args):
              logger.info(f"Sub-task {i+1}/{len(decomposed_tasks)} completed in {sub_elapsed:.2f}s")
              
              # If we have a status_container from the main thread, update it with completion
-             # REMOVED: if 'status_container' in globals():
-             # REMOVED:    status_container.info(f"Completed sub-task {i+1}/{len(decomposed_tasks)} for {filename}: {task_title} in {sub_elapsed:.2f}s")
 
 
         # --- Step 4: Aggregate Results ---
         logger.info(f"Aggregating {len(individual_analysis_results)} analysis results for {filename}.")
         # If we have a status_container from the main thread, update it
-        # REMOVED: if 'status_container' in globals():
-        # REMOVED:     status_container.info(f"Aggregating results from {len(individual_analysis_results)} sub-tasks for {filename}...")
             
         aggregated_ai_analysis_json_str = aggregate_analysis_results(
             individual_analysis_results, filename, user_prompt # Pass the modified list
@@ -2355,9 +2726,7 @@ def process_file_wrapper(args):
 
         # --- Step 5: Verification & Annotation (on aggregated results) ---
         # If we have a status_container from the main thread, update it
-        # REMOVED: if 'status_container' in globals():
-        # REMOVED:     status_container.info(f"Verifying phrases and annotating PDF for {filename}...")
-            
+                    
         # Create a processor if none exists (if preprocessed data was used)
         if preprocessed_data and 'processor' not in locals():
             processor = PDFProcessor(original_pdf_bytes_for_annotation)
@@ -2436,7 +2805,6 @@ def display_page():
     # Check if results exist
     if st.session_state.get("analysis_results"):
         # --- RESULTS VIEW ---
-        st.markdown("<h1 style='text-align: center;'>CNT SmartDocs</h1>", unsafe_allow_html=True)
         st.markdown(
             "<p style='text-align: center; font-style: italic;'>AI Powered Document Intelligence</p>",
             unsafe_allow_html=True,
@@ -2468,7 +2836,7 @@ def display_page():
         if errors:
             if not success_results: st.error(f"Processing failed for all {total_processed} file(s). See details below.")
             else: st.warning(f"Processing complete for {total_processed} file(s). {len(success_results)} succeeded, {len(errors)} failed.")
-        elif success_results: st.success(f"Successfully processed {len(success_results)} file(s).")
+        # Removed the success message that was here
 
         # Error Details Expander
         if errors:
@@ -2500,12 +2868,9 @@ def display_page():
 
     else:
         # --- INPUT VIEW ---
+
         st.markdown(
-            "<h1 style='text-align: center;'>CNT SmartDocs</h1>",
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            "<p style='text-align: center; font-style: italic;'>AI Powerered Document Intelligence</p>",
+            "<p style='text-align: center; font-style: italic;'>AI Powered Document Intelligence</p>",
             unsafe_allow_html=True,
         )
 
@@ -2532,7 +2897,10 @@ def display_page():
             key="file_uploader_decompose",
             on_change=handle_file_change,
         )
-
+        
+        # Create a placeholder for preprocessing status or features
+        preprocessing_or_features_container = st.empty()
+        
         # File Change Logic
         if st.session_state.file_selection_changed_by_user:
             logger.debug("Processing detected file change from user action.")
@@ -2560,160 +2928,193 @@ def display_page():
                 logger.info("Cleared relevant state due to file change.")
 
                 if new_files:
-                    preprocess_status_container = st.empty()
-                    preprocess_status_container.info(f"Starting preprocessing for {len(new_files)} document(s)...")
-                    with st.spinner("Preprocessing document(s)..."):
-                        for i, filename in enumerate(sorted(list(new_files))):
-                            file_obj = next((f for f in current_files if f.name == filename), None)
-                            if file_obj:
-                                try:
-                                    preprocess_status_container.info(f"Preprocessing file {i+1}/{len(new_files)}: {filename}")
-                                    file_data = file_obj.getvalue()
-                                    result = preprocess_file(
-                                        file_data, 
-                                        filename,
-                                        st.session_state.get("use_advanced_extraction", False)
-                                    )
-                                    st.session_state.preprocessing_status[filename] = result
-                                    logger.info(f"Preprocessed {filename}: {result['status']}")
-                                    preprocess_status_container.info(f"Completed {i+1}/{len(new_files)} files. Last processed: {filename}")
-                                except Exception as e:
-                                    logger.error(f"Failed to preprocess {filename}: {str(e)}", exc_info=True)
-                                    st.session_state.preprocessing_status[filename] = {"status": "error", "message": f"Failed to preprocess: {str(e)}"}
-                                    preprocess_status_container.warning(f"Error preprocessing file {i+1}/{len(new_files)}: {filename}")
-                        
-                        success_count = sum(1 for status in st.session_state.preprocessing_status.values() if status['status'] == 'success')
-                        preprocess_status_container.success(f"Preprocessing complete! {success_count}/{len(new_files)} files successfully preprocessed.")
-                    
-                    preprocessing_failed = False
-                    for filename, status in st.session_state.preprocessing_status.items():
-                        if status['status'] == 'error':
-                            st.error(f"Error preprocessing {filename}: {status['message']}")
-                            preprocessing_failed = True
-                        elif status['status'] == 'warning':
-                            st.warning(f"Warning for {filename}: {status['message']}")
-                    
-                    if not preprocessing_failed and new_files:
-                        st.success(f"Preprocessing complete for {len(new_files)} file(s)")
-            else:
-                 logger.debug("File change flag was True, but filename sets match. Ignoring spurious flag.")
-                         
-            st.session_state.current_file_objects_from_change = None 
-
-        # Analysis Inputs
-        with st.container(border=False):
-            st.session_state.user_prompt = st.text_area(
-                "Analysis Prompt",
-                placeholder="Enter your analysis instructions...",
-                height=150,
-                key="prompt_input_decompose",
-                value=st.session_state.get("user_prompt", ""),
-            )
-
-        # Process Button
-        process_button_disabled = (
-            embedding_model is None
-            or not st.session_state.get('uploaded_file_objects')
-            or not st.session_state.get('user_prompt', '').strip()
-        )
-        if st.button("Process Documents", type="primary", use_container_width=True, disabled=process_button_disabled):
-            files_to_process = st.session_state.get("uploaded_file_objects", [])
-            current_user_prompt = st.session_state.get("user_prompt", "")
-            current_use_advanced = st.session_state.get("use_advanced_extraction", False)
-
-            if not files_to_process: st.warning("Please upload one or more documents.")
-            elif not current_user_prompt.strip(): st.error("Please enter an Analysis Prompt.")
-            else:
-                st.session_state.analysis_results = [] # Clear previous results before processing
-                st.session_state.show_pdf = False
-                st.session_state.pdf_bytes = None
-                st.session_state.current_pdf_name = None
-
-                total_files = len(files_to_process)
-                overall_start_time = datetime.now()
-                results_placeholder = [None] * total_files
-                file_map = {i: f.name for i, f in enumerate(files_to_process)}
-
-                process_args = []
-                files_read_ok = True
-                for i, uploaded_file in enumerate(files_to_process):
-                    try:
-                        file_data = uploaded_file.getvalue()
-                        # Add the preprocessed data for this file to the args
-                        preprocessed_file_data = st.session_state.get("preprocessed_data", {}).get(uploaded_file.name)
-                        process_args.append(
-                            (file_data, uploaded_file.name, current_user_prompt, current_use_advanced, preprocessed_file_data)
-                        )
-                    except Exception as read_err:
-                        logger.error(f"Failed to read file {uploaded_file.name}: {read_err}", exc_info=True)
-                        st.error(f"Failed to read file {uploaded_file.name}. Please re-upload.")
-                        results_placeholder[i] = {"filename": uploaded_file.name, "error": f"Failed to read file: {read_err}"}
-                        files_read_ok = False
-
-                if files_read_ok and process_args:
-                    files_to_run_count = len(process_args)
-                    status_container = st.empty()
-                    status_container.info(f"Starting to process {files_to_run_count} document(s)...")
-                    
-                    with st.spinner("Analysing Query...", show_time=True):
-                        processed_indices = set()
-                        def run_task_with_index(item_index: int, args_tuple: tuple):
-                            filename = args_tuple[1]
-                            logger.info(f"Thread {threading.current_thread().name} starting task for index {item_index} ({filename})")
-                            # REMOVED: status_container.info(f"Processing file {item_index + 1}/{files_to_run_count}: {filename}")
-                            try:
-                                result = process_file_wrapper(args_tuple)
-                                logger.info(f"Thread {threading.current_thread().name} finished task for index {item_index} ({filename})")
-                                # REMOVED: status_container.info(f"Completed {item_index + 1}/{files_to_run_count} files. Currently processing: {filename}")
-                                return item_index, result
-                            except Exception as thread_err:
-                                logger.error(f"Unhandled error in thread task for index {item_index} ({filename}): {thread_err}", exc_info=True)
-                                # REMOVED: status_container.warning(f"Error processing file {item_index + 1}/{files_to_run_count}: {filename}")
-                                return item_index, {"filename": filename, "error": f"Unhandled thread error: {thread_err}"}
-
-                        try:
-                            if ENABLE_PARALLEL and files_to_run_count > 1:
-                                logger.info(f"Using ThreadPoolExecutor with {MAX_WORKERS} workers for {files_to_run_count} tasks.")
-                                with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                                    future_map = {executor.submit(run_task_with_index, i, arg_tuple): i for i, arg_tuple in enumerate(process_args)}
-                                    for future in concurrent.futures.as_completed(future_map):
-                                        original_index = future_map[future]
-                                        processed_indices.add(original_index)
-                                        try:
-                                            _, result_data = future.result()
-                                            results_placeholder[original_index] = result_data
-                                        except Exception as exc:
-                                            fname = file_map.get(original_index, f"File at index {original_index}")
-                                            logger.error(f'Task for index {original_index} ({fname}) failed: {exc}', exc_info=True)
-                                            results_placeholder[original_index] = {"filename": fname, "error": f"Task execution failed: {exc}"}
-                            else:
-                                logger.info(f"Processing {files_to_run_count} task(s) sequentially.")
-                                for i, arg_tuple in enumerate(process_args):
-                                    original_index = i
-                                    processed_indices.add(original_index)
+                    # Create a status indicator in place of the features container
+                    with preprocessing_or_features_container.container():
+                        with st.status(f"Preprocessing {len(new_files)} document(s)...", expanded=True) as status:
+                            preprocessing_failed = False
+                            success_count = 0
+                            
+                            for i, filename in enumerate(sorted(list(new_files))):
+                                file_obj = next((f for f in current_files if f.name == filename), None)
+                                if file_obj:
                                     try:
-                                        _, result_data = run_task_with_index(original_index, arg_tuple)
-                                        results_placeholder[original_index] = result_data
-                                    except Exception as seq_exc:
-                                         fname = file_map.get(original_index, f"File at index {original_index}")
-                                         logger.error(f'Sequential task for index {original_index} ({fname}) failed: {seq_exc}', exc_info=True)
-                                         results_placeholder[original_index] = {"filename": fname, "error": f"Task execution failed: {seq_exc}"}
+                                        # Update status with current file
+                                        status.update(label=f"Preprocessing file {i+1}/{len(new_files)}: {filename}")
+                                        st.write(f"Processing {filename}...")
+                                        
+                                        file_data = file_obj.getvalue()
+                                        result = preprocess_file(
+                                            file_data, 
+                                            filename,
+                                            st.session_state.get("use_advanced_extraction", False)
+                                        )
+                                        st.session_state.preprocessing_status[filename] = result
+                                        logger.info(f"Preprocessed {filename}: {result['status']}")
+                                        
+                                        if result['status'] == 'success':
+                                            success_count += 1
+                                            st.write(f"✅ {filename} processed successfully.")
+                                        elif result['status'] == 'warning':
+                                            st.write(f"⚠️ {filename} processed with warnings: {result['message']}")
+                                            preprocessing_failed = True
+                                        else:
+                                            st.write(f"❌ Error processing {filename}: {result['message']}")
+                                            preprocessing_failed = True
+                                            
+                                    except Exception as e:
+                                        logger.error(f"Failed to preprocess {filename}: {str(e)}", exc_info=True)
+                                        st.session_state.preprocessing_status[filename] = {"status": "error", "message": f"Failed to preprocess: {str(e)}"}
+                                        st.write(f"❌ Error processing {filename}: {str(e)}")
+                                        preprocessing_failed = True
+                            
+                            # Update status based on results
+                            if preprocessing_failed:
+                                if success_count > 0:
+                                    status.update(label=f"Preprocessing complete with issues. {success_count}/{len(new_files)} files processed successfully.", state="warning", expanded=False)
+                                else:
+                                    status.update(label="Preprocessing failed. Please check the errors and try again.", state="error", expanded=False)
+                            else:
+                                status.update(label=f"Preprocessing complete! {success_count}/{len(new_files)} files processed successfully.", state="complete", expanded=False)
+                else:
+                    logger.debug("File change flag was True, but filename sets match. Ignoring spurious flag.")
+                         
+            st.session_state.current_file_objects_from_change = None
 
-                        except Exception as pool_err:
-                             logger.error(f"Error during task execution setup/management: {pool_err}", exc_info=True)
-                             st.error(f"Error during processing: {pool_err}. Some files may not have been processed.")
-                             for i in range(total_files):
-                                  if i not in processed_indices and results_placeholder[i] is None:
-                                       fname = file_map.get(i, f"File at index {i}")
-                                       results_placeholder[i] = {"filename": fname, "error": f"Processing cancelled due to execution error: {pool_err}"}
+        # Welcome Features Section - Only show before files are processed and when not preprocessing
+        if not st.session_state.get("preprocessed_data"):            
+            # Display features grid only if not currently preprocessing files
+            with preprocessing_or_features_container.container():
+                st.markdown(f"""           
+                <div class="features-container">
+                    <div class="features-row">
+                        <div class="feature-text">{check_img} Upload your documents, ask questions and get AI analysis with verified responses.</div>
+                        <div class="feature-text">{check_img} Get analysis results from multiple documents at once with the same prompt.</div>
+                    </div>
+                    <div class="features-row">
+                        <div class="feature-text">{check_img} Ask Followup questions and talk to your documents to get more details and insights.</div>
+                        <div class="feature-text">{check_img} Export annotated documents and query results in Excel or Word format for further analysis.</div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
 
-                        final_results = [r for r in results_placeholder if r is not None]
-                        st.session_state.analysis_results = final_results
-                        total_time = (datetime.now() - overall_start_time).total_seconds()
-                        success_count = len([r for r in final_results if isinstance(r, dict) and "error" not in r])
-                        logger.info(f"Processing batch complete. Processed {success_count}/{total_files} files successfully in {total_time:.2f}s.")
-                        status_container.success(f"Processing complete! Processed {success_count}/{total_files} files successfully in {total_time:.2f} seconds.")
+        # Analysis Inputs - Only show if preprocessed data exists
+        if st.session_state.get("preprocessed_data"):
+            with st.container(border=False):
+                st.session_state.user_prompt = st.text_area(
+                    "Analysis Prompt",
+                    placeholder="Enter your analysis instructions...",
+                    height=150,
+                    key="prompt_input_decompose",
+                    value=st.session_state.get("user_prompt", ""),
+                )
 
+            # Process Button
+            process_button_disabled = (
+                embedding_model is None
+                or not st.session_state.get('uploaded_file_objects')
+                or not st.session_state.get('user_prompt', '').strip()
+            )
+            if st.button("Process Documents", type="primary", use_container_width=True, disabled=process_button_disabled):
+                files_to_process = st.session_state.get("uploaded_file_objects", [])
+                current_user_prompt = st.session_state.get("user_prompt", "")
+                current_use_advanced = st.session_state.get("use_advanced_extraction", False)
+
+                if not files_to_process: st.warning("Please upload one or more documents.")
+                elif not current_user_prompt.strip(): st.error("Please enter an Analysis Prompt.")
+                else:
+                    st.session_state.analysis_results = [] # Clear previous results before processing
+                    st.session_state.show_pdf = False
+                    st.session_state.pdf_bytes = None
+                    st.session_state.current_pdf_name = None
+
+                    total_files = len(files_to_process)
+                    overall_start_time = datetime.now()
+                    results_placeholder = [None] * total_files
+                    file_map = {i: f.name for i, f in enumerate(files_to_process)}
+
+                    process_args = []
+                    files_read_ok = True
+                    for i, uploaded_file in enumerate(files_to_process):
+                        try:
+                            file_data = uploaded_file.getvalue()
+                            # Add the preprocessed data for this file to the args
+                            preprocessed_file_data = st.session_state.get("preprocessed_data", {}).get(uploaded_file.name)
+                            process_args.append(
+                                (file_data, uploaded_file.name, current_user_prompt, current_use_advanced, preprocessed_file_data)
+                            )
+                        except Exception as read_err:
+                            logger.error(f"Failed to read file {uploaded_file.name}: {read_err}", exc_info=True)
+                            st.error(f"Failed to read file {uploaded_file.name}. Please re-upload.")
+                            results_placeholder[i] = {"filename": uploaded_file.name, "error": f"Failed to read file: {read_err}"}
+                            files_read_ok = False
+
+                    if files_read_ok and process_args:
+                        files_to_run_count = len(process_args)
+                        
+                        # Create expander for document processing status
+                        with st.expander("Document Processing Status", expanded=True):
+                            status_container = st.empty()
+                            status_container.info(f"Starting to process {files_to_run_count} document(s)...")
+                            
+                            with st.spinner("Analysing Query...", show_time=True):
+                                processed_indices = set()
+                                def run_task_with_index(item_index: int, args_tuple: tuple):
+                                    filename = args_tuple[1]
+                                    logger.info(f"Thread {threading.current_thread().name} starting task for index {item_index} ({filename})")
+                                    try:
+                                        result = process_file_wrapper(args_tuple)
+                                        logger.info(f"Thread {threading.current_thread().name} finished task for index {item_index} ({filename})")
+                                        return item_index, result
+                                    except Exception as thread_err:
+                                        logger.error(f"Unhandled error in thread task for index {item_index} ({filename}): {thread_err}", exc_info=True)
+                                        return item_index, {"filename": filename, "error": f"Unhandled thread error: {thread_err}"}
+
+                                try:
+                                    if ENABLE_PARALLEL and len(process_args) > 1:
+                                        logger.info(f"Executing {len(process_args)} tasks in parallel with max workers: {MAX_WORKERS}")
+                                        # Process each file in parallel
+                                        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                                            future_to_index = {executor.submit(run_task_with_index, i, args): i for i, args in enumerate(process_args)}
+                                            
+                                            for future in concurrent.futures.as_completed(future_to_index):
+                                                original_index = future_to_index[future]
+                                                processed_indices.add(original_index)
+                                                fname = file_map.get(original_index, f"File at index {original_index}")
+                                                try:
+                                                    _, result_data = future.result()
+                                                    results_placeholder[original_index] = result_data
+                                                except Exception as exc:
+                                                    logger.error(f'Task for index {original_index} ({fname}) failed: {exc}', exc_info=True)
+                                                    results_placeholder[original_index] = {"filename": fname, "error": f"Task execution failed: {exc}"}
+                                    else:
+                                        logger.info(f"Processing {files_to_run_count} task(s) sequentially.")
+                                        for i, arg_tuple in enumerate(process_args):
+                                            original_index = i
+                                            processed_indices.add(original_index)
+                                            try:
+                                                _, result_data = run_task_with_index(original_index, arg_tuple)
+                                                results_placeholder[original_index] = result_data
+                                            except Exception as seq_exc:
+                                                 fname = file_map.get(original_index, f"File at index {original_index}")
+                                                 logger.error(f'Sequential task for index {original_index} ({fname}) failed: {seq_exc}', exc_info=True)
+                                                 results_placeholder[original_index] = {"filename": fname, "error": f"Task execution failed: {seq_exc}"}
+
+                                except Exception as pool_err:
+                                     logger.error(f"Error during task execution setup/management: {pool_err}", exc_info=True)
+                                     st.error(f"Error during processing: {pool_err}. Some files may not have been processed.")
+                                     for i in range(total_files):
+                                          if i not in processed_indices and results_placeholder[i] is None:
+                                               fname = file_map.get(i, f"File at index {i}")
+                                               results_placeholder[i] = {"filename": fname, "error": f"Processing cancelled due to execution error: {pool_err}"}
+
+                                final_results = [r for r in results_placeholder if r is not None]
+                                st.session_state.analysis_results = final_results
+                                total_time = (datetime.now() - overall_start_time).total_seconds()
+                                success_count = len([r for r in final_results if isinstance(r, dict) and "error" not in r])
+                                logger.info(f"Processing batch complete. Processed {success_count}/{total_files} files successfully in {total_time:.2f}s.")
+                                status_container.success(f"Processing complete! Processed {success_count}/{total_files} files successfully in {total_time:.2f} seconds.")
+
+                        # Outside the expander, handle post-processing like PDF loading
                         first_success = next((r for r in final_results if isinstance(r, dict) and "error" not in r), None)
                         if first_success and first_success.get("annotated_pdf"):
                             try:
@@ -2731,12 +3132,12 @@ def display_page():
                              logger.warning("No successful results found. No initial PDF view shown.")
                              st.session_state.show_pdf = False
 
-                # Set flag to trigger scroll on next rerun
-                if success_count > 0:
-                    st.session_state.results_just_generated = True
+                    # Set flag to trigger scroll on next rerun
+                    if success_count > 0:
+                        st.session_state.results_just_generated = True
 
-                # Rerun to display results / updated PDF view state
-                st.rerun()
+                    # Rerun to display results / updated PDF view state
+                    st.rerun()
 
 
 # --- Main Execution Guard ---
