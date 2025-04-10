@@ -33,6 +33,34 @@ from thefuzz import fuzz
 import openai  # Added for Azure OpenAI integration
 import zipfile
 import urllib.parse
+import io
+import sys
+import math
+import uuid
+import torch
+import docx
+import logging
+import asyncio
+import threading
+import traceback
+import numpy as np
+import pandas as pd
+import tempfile
+import concurrent.futures
+from PIL import Image
+from copy import deepcopy
+from typing import List, Dict, Any, Tuple, Optional, Union, Set
+from pathlib import Path
+from datetime import datetime, timedelta
+import streamlit as st
+from streamlit import session_state as ss
+import fitz  # PyMuPDF
+from sentence_transformers import SentenceTransformer
+import openai  # Added for Azure OpenAI integration
+import google.generativeai as genai  # Added for Google Gemini integration
+from docx import Document
+from docx.shared import Pt, Inches
+from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 
 # --- Configuration ---
 logging.basicConfig(
@@ -43,7 +71,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # ****** SET PAGE CONFIG HERE (First Streamlit command) ******
-st.set_page_config(layout="wide", page_title="CNT SmartDocs")
+st.set_page_config(layout="wide", page_title="SmartDocs")
 # ****** END SET PAGE CONFIG ******
 
 # --- Load images as base64 for embedding in CSS ---
@@ -54,16 +82,13 @@ def get_base64_encoded_image(image_path):
 # Load all the required images
 try:
     mascot_base64 = get_base64_encoded_image("assets/mascot.png")
-    ifcontrollers_base64 = get_base64_encoded_image("assets/ifcontrollers.png") 
-    smartdocs_logo_base64 = get_base64_encoded_image("assets/smartdocslogo.png")
+    # Remove ifcontrollers logo
     images_loaded = True
     logger.info("Successfully loaded all brand images")
 except Exception as e:
     logger.error(f"Failed to load one or more images: {e}")
     images_loaded = False
     mascot_base64 = ""
-    ifcontrollers_base64 = ""
-    smartdocs_logo_base64 = ""
 
 # Create checkmark icon for features list
 check_base64 = get_base64_encoded_image("assets/correct.png")
@@ -173,27 +198,14 @@ st.markdown(f"""
         pointer-events: none; /* Prevents the mascot from intercepting mouse clicks */
     }}
 
-    /* IF Controller Logo - Absolute Position at Top Left */
-    .ifcontroller-logo {{
-        position: absolute;
-        top: -30px;
-        margin-right: 45rem;
-        margin-left: -1rem;
-        z-index: 999;
-    }}
-
-    /* SmartDocs Logo Container - For the center top position */
-    .smartdocs-logo-container {{
-        display: flex;
-        justify-content: center;
-        margin-bottom: 0rem;
-        margin-top: 3rem;
-    }}
-
-    /* SmartDocs Logo */
-    .smartdocs-logo {{
-        height: 70px; /* Adjust size as needed */
-        margin-top: 1rem;
+    
+    .smartdocs-subtitle {{
+        color: {DARK_BLUE};
+        font-size: 1.2rem;
+        font-weight: 400;
+        text-align: center;
+        margin-top: 0.3rem;
+        margin-bottom: 2rem;
     }}
 
     /* Hide default title */
@@ -246,16 +258,16 @@ st.markdown(f"""
     <img src="data:image/png;base64,{mascot_base64}" alt="Mascot">
 </div>
 
-<!-- Fixed IF Controller Logo -->
-<div class="ifcontroller-logo">
-    <img src="data:image/png;base64,{ifcontrollers_base64}" alt="IF Controllers Logo">
-</div>
-
-<!-- SmartDocs Logo (will be placed at the beginning of the content) -->
-<div class="smartdocs-logo-container">
-    <img src="data:image/png;base64,{smartdocs_logo_base64}" alt="SmartDocs Logo" class="smartdocs-logo">
+<!-- SmartDocs Title (replacing logo) -->
+<div>
+    
 </div>
 """, unsafe_allow_html=True)
+
+st.markdown(
+    "<h1 style='text-align: center; color: #00ADE4; margin-left: 1rem;'>SmartDocs</h1>",
+    unsafe_allow_html=True,
+)
 # --- End Custom CSS Styling ---
 
 
@@ -265,13 +277,12 @@ FUZZY_MATCH_THRESHOLD = 88  # Adjust this threshold (0-100)
 RAG_TOP_K = 10 # Number of relevant chunks to retrieve per sub-prompt (Adjusted from 15)
 LOCAL_EMBEDDING_MODEL_PATH = "./embedding_model_local"
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"  # Smaller, faster model for embeddings
-# Consider using a faster/cheaper model for decomposition if latency is an issue
 
-# Using Azure OpenAI instead
-DECOMPOSITION_MODEL_NAME = "gpt-4o"  # Using the deployment name from secrets
-ANALYSIS_MODEL_NAME = "gpt-4o"  # Using the deployment name from secrets
+# Using Google Gemini instead of Azure OpenAI
+DECOMPOSITION_MODEL_NAME = "gemini-2.0-flash-Lite"  # Using gemini-2.0-flash for decomposition
+ANALYSIS_MODEL_NAME = "gemini-2.0-flash"  # Using gemini-2.0-flash for analysis
 
-# --- End Azure OpenAI configuration ---
+# --- End Google Gemini configuration ---
 
 # --- Load Embedding Model (Cached) ---
 @st.cache_resource # Use cache_resource for non-data objects like models
@@ -630,42 +641,32 @@ class DocumentAnalyzer:
 
         if model_name not in _thread_local.clients:
             try:
-                # --- Azure OpenAI Configuration ---
+                # --- Google Gemini Configuration ---
                 if hasattr(st, "secrets"):
-                    # Get Azure OpenAI configuration from secrets
-                    azure_endpoint = st.secrets.get("AZURE_OPENAI_ENDPOINT")
-                    azure_api_key = st.secrets.get("AZURE_OPENAI_API_KEY")
-                    azure_api_version = st.secrets.get("AZURE_OPENAI_API_VERSION", "2024-10-21")
-                    azure_deployment = st.secrets.get("AZURE_OPENAI_DEPLOYMENT_NAME")
-                    
-                    logger.info(f"Using Azure OpenAI configuration from Streamlit secrets for model {model_name}.")
+                    # Get Google API key from secrets
+                    google_api_key = st.secrets.get("GOOGLE_API_KEY")
+                    logger.info(f"Using Google Gemini configuration from Streamlit secrets for model {model_name}.")
                 else:
-                    # Get Azure OpenAI configuration from environment variables
-                    azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-                    azure_api_key = os.getenv("AZURE_OPENAI_API_KEY")
-                    azure_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
-                    azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+                    # Get Google API key from environment variables
+                    google_api_key = os.getenv("GOOGLE_API_KEY")
                     
-                    if not azure_endpoint or not azure_api_key or not azure_deployment:
-                        raise ValueError("Azure OpenAI configuration is incomplete.")
+                    if not google_api_key:
+                        raise ValueError("Google Gemini API key is missing.")
                     
-                    logger.info(f"Using Azure OpenAI configuration from environment variables for model {model_name}.")
+                    logger.info(f"Using Google Gemini configuration from environment variables for model {model_name}.")
                 
-                # Configure the OpenAI client with Azure parameters
-                client = openai.AsyncAzureOpenAI(
-                    api_version=azure_api_version,
-                    azure_endpoint=azure_endpoint,
-                    api_key=azure_api_key,
-                )
+                # Configure the Gemini client
+                genai.configure(api_key=google_api_key)
                 
+                # No need to store client as genai is configured globally
                 _thread_local.clients[model_name] = {
-                    "client": client,
-                    "deployment": azure_deployment
+                    "client": genai,
+                    "model_name": model_name
                 }
                 
                 logger.info(
-                    f"Initialized Azure OpenAI client for thread {threading.current_thread().name} "
-                    f"with deployment: {azure_deployment}"
+                    f"Initialized Google Gemini client for thread {threading.current_thread().name} "
+                    f"with model: {model_name}"
                 )
                 
             except Exception as e:
@@ -680,38 +681,63 @@ class DocumentAnalyzer:
         try:
             client_data = self._ensure_client(model_name)
             client = client_data["client"]
-            deployment = client_data["deployment"]
             
-            # --- Azure OpenAI API Call ---
-            # Format messages for OpenAI API
-            formatted_messages = []
+            # --- Google Gemini API Call ---
+            # Convert to Gemini message format
+            gemini_messages = []
             for msg in messages:
                 role = msg.get("role")
                 content = msg.get("content")
-                # OpenAI expects system, user, assistant roles
-                if role in ["system", "user", "assistant"]:
-                    formatted_messages.append({"role": role, "content": content})
-                elif role == "model":  # Handle 'model' role as 'assistant'
-                    formatted_messages.append({"role": "assistant", "content": content})
+                
+                # Gemini uses 'user' and 'model' roles
+                if role == "system":
+                    # Prepend system messages to first user message or add as user message if no user message exists
+                    system_content = content
+                    if any(m.get("role") == "user" for m in messages):
+                        continue  # We'll handle this when processing user messages
+                    else:
+                        gemini_messages.append({"role": "user", "parts": [{"text": system_content}]})
+                elif role == "user":
+                    # Check if we need to prepend a system message
+                    user_content = content
+                    system_content = ""
+                    if not gemini_messages and any(m.get("role") == "system" for m in messages):
+                        system_msg = next((m for m in messages if m.get("role") == "system"), None)
+                        if system_msg:
+                            system_content = system_msg.get("content", "")
+                    
+                    text_content = f"{system_content}\n\n{user_content}" if system_content else user_content
+                    gemini_messages.append({"role": "user", "parts": [{"text": text_content}]})
+                elif role == "assistant" or role == "model":
+                    gemini_messages.append({"role": "model", "parts": [{"text": content}]})
             
-            logger.info(f"Sending request to Azure OpenAI deployment: {deployment}")
-            # logger.debug(f"Formatted messages for Azure OpenAI: {json.dumps(formatted_messages, indent=2)}")
+            logger.info(f"Sending request to Google Gemini model: {model_name}")
             
-            response = await client.chat.completions.create(
-                model=deployment,
-                messages=formatted_messages,
-                max_tokens=8192,  # Keep high for analysis
-                temperature=0.1,  # Keep low for factual tasks
-                timeout=300  # Timeout in seconds
+            # Create Gemini model
+            model = client.GenerativeModel(model_name)
+            
+            # Use asynchronous event loop with a future to run the synchronous Gemini API call
+            loop = asyncio.get_event_loop()
+            response_future = loop.run_in_executor(
+                None, 
+                lambda: model.generate_content(
+                    gemini_messages,
+                    generation_config=client.GenerationConfig(
+                        temperature=0.1,  # Keep low for factual tasks
+                        max_output_tokens=8192,  # Max for analysis
+                    )
+                )
             )
             
-            if not response.choices:
-                logger.error(f"Azure OpenAI ({deployment}) returned no choices.")
-                raise ValueError(f"Azure OpenAI ({deployment}) returned no choices.")
+            # Wait for the future to complete
+            response = await response_future
             
-            content = response.choices[0].message.content
-            logger.info(f"Received response from Azure OpenAI deployment {deployment}")
-            # logger.debug(f"Raw Azure OpenAI ({deployment}) response content: {content}")
+            if not response or not hasattr(response, "text"):
+                logger.error(f"Google Gemini ({model_name}) returned no text.")
+                raise ValueError(f"Google Gemini ({model_name}) returned no text.")
+            
+            content = response.text
+            logger.info(f"Received response from Google Gemini model {model_name}")
             return content
             
         except Exception as e:
