@@ -279,7 +279,7 @@ LOCAL_EMBEDDING_MODEL_PATH = "./embedding_model_local"
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"  # Smaller, faster model for embeddings
 
 # Using Google Gemini instead of Azure OpenAI
-DECOMPOSITION_MODEL_NAME = "gemini-2.0-flash-Lite"  # Using gemini-2.0-flash for decomposition
+DECOMPOSITION_MODEL_NAME = "gemini-2.0-flash-lite"  # Using gemini-2.0-flash for decomposition
 ANALYSIS_MODEL_NAME = "gemini-2.0-flash"  # Using gemini-2.0-flash for analysis
 
 # --- End Google Gemini configuration ---
