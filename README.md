@@ -20,14 +20,14 @@ Try it out: https://smartdocs.streamlit.app/
 *   **PDF Annotation & Viewer:**
     *   Highlights verified supporting phrases directly on a rendered view of the PDF.
     *   Provides an interactive PDF viewer within the Streamlit app to navigate the document and view annotations.
-*   **Result Export:** Allows exporting the structured analysis results to Excel (`.xlsx`) and JSON (`.json`) formats.
+*   **Result Export:** Allows exporting the structured analysis results to Excel (`.xlsx`) and Word (`.docx`) formats.
 *   **Configurable:** Settings like AI models, RAG parameters, fuzzy matching threshold, and parallel processing can be configured via environment variables.
 
 ## Installation
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/ritwikrathore/smartdocs.git
+    git clone https://github.com/ritwikrathore/cntsmartdocs.git
     cd smartdocs
     ```
 2.  **Create and activate a virtual environment (recommended):**
