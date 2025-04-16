@@ -2178,7 +2178,7 @@ def display_analysis_results(analysis_results: List[Dict[str, Any]]):
             with st.expander("⚠️ Report Issue", expanded=False):
                 st.markdown("""
                     ### Report an Issue
-                    If you encounter an issue, please describe it below, download the report package, and then **manually email the package** to CNT_Automations@ifc.org.
+                    If you encounter an issue, please describe it below, download the report package, and then **manually email the package** to ritwikrathore@yahoo.co.in.
                 """)
                 
                 # Issue description
