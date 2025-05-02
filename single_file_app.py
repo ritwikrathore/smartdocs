@@ -28,7 +28,7 @@ from docx import Document # Import for Word export
 from docx.shared import Pt, RGBColor # Import for Word export styling
 from docx.enum.text import WD_ALIGN_PARAGRAPH # Import for Word export alignment
 from dotenv import load_dotenv
-from sentence_transformers import SentenceTransformer, util
+from sentence_transformers import SentenceTransformer, util, CrossEncoder
 from thefuzz import fuzz
 import openai  # Added for Azure OpenAI integration
 import zipfile
@@ -54,7 +54,6 @@ from pathlib import Path
 from datetime import datetime, timedelta
 import streamlit as st
 from streamlit import session_state as ss
-import fitz  # PyMuPDF
 from sentence_transformers import SentenceTransformer
 import openai  # Added for Azure OpenAI integration
 import google.generativeai as genai  # Added for Google Gemini integration
@@ -274,9 +273,12 @@ st.markdown(
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", 4))
 ENABLE_PARALLEL = os.environ.get("ENABLE_PARALLEL", "true").lower() == "true"
 FUZZY_MATCH_THRESHOLD = 88  # Adjust this threshold (0-100)
-RAG_TOP_K = 10 # Number of relevant chunks to retrieve per sub-prompt (Adjusted from 15)
+INITIAL_RAG_TOP_K = 20  # Increased from 10 to 20 for initial retrieval
+FINAL_TOP_K = 10  # Number of reranked results to keep
+RAG_TOP_K = FINAL_TOP_K  # Keep this for backward compatibility
 LOCAL_EMBEDDING_MODEL_PATH = "./embedding_model_local"
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"  # Smaller, faster model for embeddings
+RERANKER_MODEL_PATH = "./reranking_model_local"  # Path to the reranker model
 
 # Using Google Gemini instead of Azure OpenAI
 DECOMPOSITION_MODEL_NAME = "gemini-2.0-flash-lite"  # Using gemini-2.0-flash for decomposition
@@ -307,8 +309,31 @@ def load_embedding_model():
         model = None # Ensure model is None on error
     return model
 
-# Load the model using the cached function
+# --- Load Reranker Model (Cached) ---
+@st.cache_resource
+def load_reranker_model():
+    """Loads the CrossEncoder reranker model and caches it."""
+    model = None
+    if not os.path.exists(RERANKER_MODEL_PATH) or not os.path.isdir(RERANKER_MODEL_PATH):
+        logger.error(f"Local reranker model directory not found at: {RERANKER_MODEL_PATH}")
+        st.error(f"Fatal Error: Reranker model not found at the required local path ({RERANKER_MODEL_PATH}). Please ensure the model directory is present.")
+        return None
+
+    try:
+        logger.info(f"Loading reranker model from: {RERANKER_MODEL_PATH}...")
+        # Check for CUDA availability, fallback to CPU if needed
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = CrossEncoder(RERANKER_MODEL_PATH)
+        logger.info("Reranker model loaded successfully from local path.")
+    except Exception as e:
+        logger.error(f"Error loading reranker model from {RERANKER_MODEL_PATH}: {e}", exc_info=True)
+        st.error(f"Failed to load the reranker model from the local path. Error: {e}")
+        model = None
+    return model
+
+# Load both models using the cached functions
 embedding_model = load_embedding_model()
+reranker_model = load_reranker_model()
 
 # Function to preprocess files when uploaded
 def preprocess_file(file_data: bytes, filename: str, use_advanced_extraction: bool = False):
@@ -456,6 +481,61 @@ class Counter:
         with self._lock:
             return self._value
 
+def get_bm25_results(prompt: str, chunks: List[Dict[str, Any]], top_k: int) -> List[Tuple[int, float]]:
+    """
+    Retrieves the top_k most relevant chunks using BM25 ranking.
+    
+    Args:
+        prompt: The query text
+        chunks: List of document chunks
+        top_k: Number of top chunks to retrieve
+        
+    Returns:
+        List[Tuple[int, float]]: List of (chunk_index, score) tuples
+    """
+    try:
+        from rank_bm25 import BM25Okapi
+    except ImportError:
+        logger.error("rank_bm25 package not installed. Please install with: pip install rank-bm25")
+        return []
+
+    # Extract texts and create corpus
+    chunk_texts = [chunk.get("text", "").strip() for chunk in chunks]
+    valid_indices = [i for i, text in enumerate(chunk_texts) if text]
+    valid_texts = [chunk_texts[i] for i in valid_indices]
+    
+    if not valid_texts:
+        logger.warning("No valid texts found for BM25 ranking.")
+        return []
+        
+    try:
+        # Tokenize corpus
+        tokenized_corpus = [text.lower().split() for text in valid_texts]
+        tokenized_query = prompt.lower().split()
+        
+        # Create BM25 model
+        bm25 = BM25Okapi(tokenized_corpus)
+        
+        # Get scores
+        scores = bm25.get_scores(tokenized_query)
+        
+        # Get top_k indices and scores
+        top_k_actual = min(top_k, len(scores))
+        top_indices = np.argpartition(scores, -top_k_actual)[-top_k_actual:]
+        top_scores = scores[top_indices]
+        
+        # Sort by score (descending)
+        sorted_pairs = sorted(zip(top_indices, top_scores), key=lambda x: x[1], reverse=True)
+        
+        # Map back to original indices
+        results = [(valid_indices[idx], score) for idx, score in sorted_pairs]
+        
+        return results
+        
+    except Exception as e:
+        logger.error(f"Error in BM25 retrieval: {e}", exc_info=True)
+        return []
+
 # --- RAG Retrieval Function ---
 def retrieve_relevant_chunks(
     prompt: str,
@@ -466,19 +546,18 @@ def retrieve_relevant_chunks(
     valid_chunk_indices=None
 ) -> List[Dict[str, Any]]:
     """
-    Retrieves the top_k most relevant chunks based on semantic similarity to the prompt.
-    If precomputed embeddings are provided, skips chunk embedding generation.
+    Retrieves the top_k most relevant chunks using hybrid search (BM25 + semantic) and reranking.
     
     Args:
         prompt: The prompt/query text to find matches for
         chunks: List of document chunks
         model: The SentenceTransformer model for embeddings
-        top_k: Number of top chunks to retrieve
+        top_k: Number of top chunks to retrieve (after reranking)
         precomputed_embeddings: Optional precomputed embeddings for chunks
         valid_chunk_indices: Optional mapping of valid chunk indices
         
     Returns:
-        List[Dict[str, Any]]: List of dictionaries, each containing 'text', 'page_num', 'score', 'chunk_id' for the relevant chunks.
+        List[Dict[str, Any]]: List of dictionaries containing chunk details
     """
     if not chunks or not prompt or model is None:
         logger.warning(f"RAG retrieval skipped for prompt '{prompt[:50]}...': No chunks, prompt, or model.")
@@ -490,25 +569,32 @@ def retrieve_relevant_chunks(
         return []
 
     try:
+        # --- Step 1: BM25 Retrieval (Get top 10) ---
+        logger.info("RAG: Running BM25 retrieval...")
+        bm25_results = get_bm25_results(prompt, chunks, 10)  # Get top 10 from BM25
+        bm25_indices = {idx for idx, _ in bm25_results}
+        
+        # --- Step 2: Semantic Search (Get top 10) ---
+        logger.info("RAG: Running semantic search...")
         # Generate embedding for the prompt
-        logger.info(f"RAG: Generating embedding for prompt '{prompt[:50]}...'")
         prompt_embedding = model.encode(
             prompt, convert_to_tensor=True, show_progress_bar=False
         )
         
-        # Use precomputed embeddings if available, otherwise compute them now
+        # Use precomputed embeddings if available
         if precomputed_embeddings is not None and valid_chunk_indices is not None:
-            logger.info(f"RAG: Using precomputed embeddings for {len(precomputed_embeddings)} chunks")
+            logger.info(f"RAG: Using precomputed embeddings for semantic search")
             chunk_embeddings = precomputed_embeddings
+            semantic_valid_indices = valid_chunk_indices
         else:
-            logger.info(f"RAG: Generating embeddings for {len(chunk_texts)} chunks")
-            valid_chunk_indices = [i for i, text in enumerate(chunk_texts) if text.strip()]
-            valid_chunk_texts = [chunk_texts[i] for i in valid_chunk_indices]
-
+            logger.info(f"RAG: Generating embeddings for semantic search")
+            semantic_valid_indices = [i for i, text in enumerate(chunk_texts) if text.strip()]
+            valid_chunk_texts = [chunk_texts[i] for i in semantic_valid_indices]
+            
             if not valid_chunk_texts:
-                logger.warning(f"RAG retrieval skipped for prompt '{prompt[:50]}...': No non-empty chunk texts.")
+                logger.warning("No valid texts for semantic search.")
                 return []
-
+                
             chunk_embeddings = model.encode(
                 valid_chunk_texts, convert_to_tensor=True, show_progress_bar=False
             )
@@ -516,45 +602,73 @@ def retrieve_relevant_chunks(
         # Ensure embeddings are on the same device
         if prompt_embedding.device != chunk_embeddings.device:
             prompt_embedding = prompt_embedding.to(chunk_embeddings.device)
-            logger.debug(f"Moved prompt embedding to device: {chunk_embeddings.device}")
-
+            
+        # Get semantic search scores
         cosine_scores = util.pytorch_cos_sim(prompt_embedding, chunk_embeddings)[0]
         cosine_scores_np = cosine_scores.cpu().numpy()
+        
+        # Get top 10 from semantic search
+        semantic_top_k = 10
+        actual_semantic_top_k = min(semantic_top_k, len(semantic_valid_indices))
+        semantic_top_indices_relative = np.argpartition(cosine_scores_np, -actual_semantic_top_k)[-actual_semantic_top_k:]
+        semantic_top_scores = cosine_scores_np[semantic_top_indices_relative]
+        semantic_sorted_indices = semantic_top_indices_relative[np.argsort(semantic_top_scores)[::-1]]
+        semantic_indices = {semantic_valid_indices[i] for i in semantic_sorted_indices}
+        
+        # --- Step 3: Combine Results ---
+        combined_indices = list(bm25_indices | semantic_indices)  # Union of both sets
+        
+        # --- Step 4: Reranking of Combined Results ---
+        if reranker_model is not None and combined_indices:
+            logger.info(f"RAG: Reranking {len(combined_indices)} combined results...")
+            rerank_pairs = []
+            for chunk_index in combined_indices:
+                chunk_text = chunks[chunk_index].get("text", "")
+                rerank_pairs.append([prompt, chunk_text])
+            
+            # Get reranking scores
+            rerank_scores = reranker_model.predict(rerank_pairs)
+            
+            # Sort by reranking scores
+            reranked_pairs = list(zip(combined_indices, rerank_scores))
+            reranked_pairs.sort(key=lambda x: x[1], reverse=True)
+            
+            # Take top_k after reranking
+            final_top_k = min(top_k, len(reranked_pairs))
+            results = []
+            
+            for i in range(final_top_k):
+                chunk_index, score = reranked_pairs[i]
+                chunk = chunks[chunk_index]
+                results.append({
+                    "text": chunk.get("text", ""),
+                    "page_num": chunk.get("page_num", -1),
+                    "score": float(score),
+                    "chunk_id": chunk.get("chunk_id", f"unknown_{chunk_index}"),
+                    "retrieval_method": "hybrid"
+                })
+        else:
+            # Fallback if reranker is not available
+            logger.warning("RAG: Reranker not available, using combined scores without reranking.")
+            results = []
+            for chunk_index in combined_indices[:top_k]:
+                chunk = chunks[chunk_index]
+                # Use BM25 score if available, otherwise semantic score
+                score = next((score for idx, score in bm25_results if idx == chunk_index), 
+                           float(cosine_scores_np[semantic_valid_indices.index(chunk_index)]) if chunk_index in semantic_indices else 0.0)
+                results.append({
+                    "text": chunk.get("text", ""),
+                    "page_num": chunk.get("page_num", -1),
+                    "score": score,
+                    "chunk_id": chunk.get("chunk_id", f"unknown_{chunk_index}"),
+                    "retrieval_method": "hybrid_no_rerank"
+                })
 
-        actual_top_k = min(top_k, len(valid_chunk_indices))
-        # Avoid error if actual_top_k is 0
-        if actual_top_k == 0:
-             logger.warning(f"RAG: No valid chunks to retrieve for prompt '{prompt[:50]}...'.")
-             return []
-        top_k_indices_relative = np.argpartition(cosine_scores_np, -actual_top_k)[-actual_top_k:]
-        top_k_scores = cosine_scores_np[top_k_indices_relative]
-        sorted_top_k_indices_relative = top_k_indices_relative[np.argsort(top_k_scores)[::-1]]
-
-        top_k_original_indices = [
-            valid_chunk_indices[i] for i in sorted_top_k_indices_relative
-        ]
-
-        # --- Construct list of result dictionaries ---
-        results = []
-        for i, chunk_index in enumerate(top_k_original_indices):
-            chunk = chunks[chunk_index]
-            score = cosine_scores_np[sorted_top_k_indices_relative[i]]
-            results.append({
-                "text": chunk.get("text", ""),
-                "page_num": chunk.get("page_num", -1), # Use -1 or None if page unknown
-                "score": float(score), # Convert numpy float
-                "chunk_id": chunk.get("chunk_id", f"unknown_{chunk_index}")
-            })
-
-        logger.info(
-            f"RAG: Retrieved {len(results)} chunks for prompt '{prompt[:50]}...'."
-        )
-
-        # --- Return the list of dictionaries ---
+        logger.info(f"RAG: Retrieved and reranked {len(results)} chunks using hybrid search.")
         return results
 
     except Exception as e:
-        logger.error(f"Error during RAG retrieval for prompt '{prompt[:50]}...': {e}", exc_info=True)
+        logger.error(f"Error during hybrid RAG retrieval for prompt '{prompt[:50]}...': {e}", exc_info=True)
         return []
 
 
@@ -2068,7 +2182,7 @@ def display_analysis_results(analysis_results: List[Dict[str, Any]]):
                         try:
                             with st.spinner("Thinking..."):
                                 logger.info(f"Chat RAG started for: {prompt[:50]}...")
-                                CHAT_RAG_TOP_K_PER_DOC = 5 # Increased from 3 to 5, to get more context
+                                CHAT_RAG_TOP_K_PER_DOC = 10 # Increased from 3 to 5, to get more context
                                 relevant_chunks = retrieve_relevant_chunks_for_chat(prompt, top_k_per_doc=CHAT_RAG_TOP_K_PER_DOC)
                                 analyzer = DocumentAnalyzer()
                                 logger.info(f"Generating chat response for: {prompt[:50]}...")

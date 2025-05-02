@@ -1,4 +1,4 @@
-# download_model.py
+# download_embedding_model.py
 from sentence_transformers import SentenceTransformer
 import os
 
@@ -21,6 +21,5 @@ try:
         model = SentenceTransformer(MODEL_NAME)
         model.save(SAVE_PATH)
         print(f"Model '{MODEL_NAME}' saved successfully to '{SAVE_PATH}'")
-        print("You can now copy this entire directory to your Azure application.")
 except Exception as e:
         print(f"Error downloading or saving model: {e}")
